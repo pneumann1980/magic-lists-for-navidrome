@@ -45,7 +45,7 @@ logging.getLogger('httpcore').setLevel(logging.WARNING)
 from .navidrome_client import NavidromeClient
 from .ai_client import AIClient
 from .database import DatabaseManager, get_db
-from .schemas import CreatePlaylistRequest, CreateGenrePlaylistRequest, Playlist, RediscoverWeeklyResponse, RediscoverWeeklyV2Response, CreateRediscoverPlaylistRequest, PlaylistWithScheduleInfo
+from .schemas import CreatePlaylistRequest, CreateGenrePlaylistRequest, Playlist, RediscoverWeeklyResponse, RediscoverWeeklyV2Response, CreateRediscoverPlaylistRequest, PlaylistWithScheduleInfo, UpdatePlaylistSettingsRequest
 from .recipe_manager import recipe_manager
 from .rediscover import RediscoverWeekly, ReDiscoverV2Processor
 from .track_scoring import filter_tracks_for_this_is_playlist
@@ -964,64 +964,64 @@ async def refresh_scheduled_playlists():
     """Check for and refresh scheduled playlists that are due"""
     try:
         current_time = datetime.now()
-        
-        # Only log heartbeat in DEBUG mode, always log when tasks are found
+
         if LOG_LEVEL == "DEBUG":
             scheduler_logger.debug(f"🔄 Scheduler auto-run initiated at {current_time.strftime('%H:%M:%S')}")
-        
-        if LOG_LEVEL == "DEBUG":
-            scheduler_logger.debug("🔍 Checking for playlists due for refresh...")
-        else:
-            scheduler_logger.info("🔍 Checking for playlists due for refresh...")
-        
+
+        scheduler_logger.info("🔍 Checking for playlists due for refresh...")
+
         # Get database path from environment variable with smart defaults
-        # Docker: /app/data/magiclists.db (set in docker-compose.yml)
-        # Standalone: ./magiclists.db (current directory)
         default_path = "/app/data/magiclists.db" if os.path.exists("/app/data") else "./magiclists.db"
         db_path = os.getenv("DATABASE_PATH", default_path)
         db = DatabaseManager(db_path)
         current_time = datetime.now()
-        
+
         # Get playlists due for refresh (including 7-day catch-up window)
         scheduled_playlists = await db.get_scheduled_playlists_due(current_time, grace_hours=168)
-        
+
         if not scheduled_playlists:
             if LOG_LEVEL == "DEBUG":
                 scheduler_logger.debug("✅ No playlists due for refresh at this time")
-            return
-        
-        # Group by navidrome_playlist_id to prevent duplicate processing
-        # Only process the most recent overdue refresh for each playlist
-        unique_playlists = {}
-        for playlist in scheduled_playlists:
-            playlist_id = playlist.navidrome_playlist_id
-            if playlist_id not in unique_playlists:
-                unique_playlists[playlist_id] = playlist
             else:
-                # Keep the more recent one (closer to current time)
-                existing = datetime.fromisoformat(unique_playlists[playlist_id].next_refresh)
-                current = datetime.fromisoformat(playlist.next_refresh)
-                if current > existing:
-                    unique_playlists[playlist_id] = playlist
-        
+                scheduler_logger.info("✅ No playlists due for refresh at this time")
+            return
+
+        # Group by navidrome_playlist_id to prevent duplicate processing.
+        # Keep the most recent (highest id) record per playlist – this is the
+        # canonical row whose next_refresh will be updated after the refresh.
+        unique_playlists: dict = {}
+        for playlist in scheduled_playlists:
+            pid = playlist.navidrome_playlist_id
+            if pid not in unique_playlists or playlist.id > unique_playlists[pid].id:
+                unique_playlists[pid] = playlist
+
         final_playlists = list(unique_playlists.values())
-        
+
         scheduler_logger.info(f"📋 Found {len(final_playlists)} playlist(s) due for refresh (deduplicated from {len(scheduled_playlists)} total)")
-        
+
         for scheduled_playlist in final_playlists:
-            # Check if this is a catch-up refresh
+            # Clean up any stale duplicate rows before refreshing
+            await db.delete_duplicate_scheduled_playlists(scheduled_playlist.navidrome_playlist_id)
+
+            # Log catch-up info
             scheduled_time = datetime.fromisoformat(scheduled_playlist.next_refresh)
             if scheduled_time < current_time:
                 overdue_hours = (current_time - scheduled_time).total_seconds() / 3600
                 scheduler_logger.info(f"🕐 Catching up on overdue playlist {scheduled_playlist.navidrome_playlist_id} (missed by {overdue_hours:.1f} hours)")
-            
-            if scheduled_playlist.playlist_type == "rediscover":
-                await refresh_rediscover_playlist(scheduled_playlist, db)
-            elif scheduled_playlist.playlist_type == "this_is":
-                await refresh_this_is_playlist(scheduled_playlist, db)
-                
+
+            try:
+                if scheduled_playlist.playlist_type == "rediscover":
+                    await refresh_rediscover_playlist(scheduled_playlist, db)
+                elif scheduled_playlist.playlist_type == "this_is":
+                    await refresh_this_is_playlist(scheduled_playlist, db)
+                else:
+                    scheduler_logger.warning(f"⚠️ Unknown playlist type '{scheduled_playlist.playlist_type}' for {scheduled_playlist.navidrome_playlist_id} – skipping")
+            except Exception as playlist_err:
+                scheduler_logger.error(f"❌ Failed to refresh playlist {scheduled_playlist.navidrome_playlist_id}: {playlist_err}")
+                # Continue with remaining playlists even if one fails
+
     except Exception as e:
-        scheduler_logger.error(f"❌ Error checking scheduled playlists: {e}")
+        scheduler_logger.error(f"❌ Error in refresh_scheduled_playlists: {e}")
 
 async def refresh_rediscover_playlist(scheduled_playlist, db: DatabaseManager):
     """Refresh a specific Re-Discover Weekly playlist"""
@@ -1306,6 +1306,111 @@ async def delete_playlist(playlist_id: int, db: DatabaseManager = Depends(get_db
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete playlist: {str(e)}")
+
+@app.post("/api/playlists/{playlist_id}/refresh")
+async def refresh_playlist_now(playlist_id: int, db: DatabaseManager = Depends(get_db)):
+    """Manually refresh a specific playlist immediately"""
+    try:
+        playlist = await db.get_playlist_by_id_with_schedule_info(playlist_id)
+
+        if not playlist:
+            raise HTTPException(status_code=404, detail="Playlist not found")
+
+        navidrome_playlist_id = playlist.get("navidrome_playlist_id")
+        if not navidrome_playlist_id:
+            raise HTTPException(status_code=400, detail="Playlist has no Navidrome ID")
+
+        playlist_type = playlist.get("playlist_type")
+        if not playlist_type:
+            raise HTTPException(status_code=400, detail="Playlist has no scheduled refresh type - only scheduled playlists can be refreshed")
+
+        # Get the scheduled playlist record to pass into the refresh functions
+        scheduled = await db.get_scheduled_playlist_by_navidrome_id(navidrome_playlist_id)
+        if not scheduled:
+            raise HTTPException(status_code=400, detail="No refresh schedule found for this playlist. Set a refresh frequency first.")
+
+        # Clean up any duplicates to keep DB tidy
+        await db.delete_duplicate_scheduled_playlists(navidrome_playlist_id)
+
+        scheduler_logger.info(f"🔄 Manual refresh requested for playlist ID: {playlist_id} (type: {playlist_type})")
+
+        if scheduled.playlist_type == "rediscover":
+            await refresh_rediscover_playlist(scheduled, db)
+        elif scheduled.playlist_type == "this_is":
+            await refresh_this_is_playlist(scheduled, db)
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported playlist type for refresh: {scheduled.playlist_type}")
+
+        return {"message": "Playlist refreshed successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        scheduler_logger.error(f"❌ Error in manual playlist refresh for ID {playlist_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to refresh playlist: {str(e)}")
+
+@app.patch("/api/playlists/{playlist_id}/settings")
+async def update_playlist_settings(playlist_id: int, request: UpdatePlaylistSettingsRequest, db: DatabaseManager = Depends(get_db)):
+    """Update playlist refresh frequency settings"""
+    try:
+        if request.refresh_frequency not in ["none", "daily", "weekly", "monthly"]:
+            raise HTTPException(status_code=400, detail="Invalid refresh_frequency. Must be one of: none, daily, weekly, monthly")
+
+        playlist = await db.get_playlist_by_id_with_schedule_info(playlist_id)
+        if not playlist:
+            raise HTTPException(status_code=404, detail="Playlist not found")
+
+        navidrome_playlist_id = playlist.get("navidrome_playlist_id")
+        if not navidrome_playlist_id:
+            raise HTTPException(status_code=400, detail="Playlist has no Navidrome ID")
+
+        if request.refresh_frequency == "none":
+            # Remove the scheduled refresh entirely
+            await db.delete_scheduled_playlist_by_navidrome_id(navidrome_playlist_id)
+            scheduler_logger.info(f"📅 Removed refresh schedule for playlist ID: {playlist_id}")
+            return {"message": "Scheduled refresh removed", "refresh_frequency": "none", "next_refresh": None}
+        else:
+            next_refresh = calculate_next_refresh(request.refresh_frequency)
+
+            # Clean up any duplicates first
+            await db.delete_duplicate_scheduled_playlists(navidrome_playlist_id)
+
+            existing = await db.get_scheduled_playlist_by_navidrome_id(navidrome_playlist_id)
+
+            if existing:
+                await db.update_scheduled_playlist_settings(
+                    navidrome_playlist_id=navidrome_playlist_id,
+                    refresh_frequency=request.refresh_frequency,
+                    next_refresh=next_refresh
+                )
+            else:
+                # Create a new schedule - determine playlist type from current data
+                playlist_type = playlist.get("playlist_type")
+                if not playlist_type:
+                    # Infer type from playlist name as fallback
+                    playlist_name = playlist.get("playlist_name", "")
+                    playlist_type = "rediscover" if "Re-Discover" in playlist_name else "this_is"
+
+                await db.create_scheduled_playlist(
+                    playlist_type=playlist_type,
+                    navidrome_playlist_id=navidrome_playlist_id,
+                    refresh_frequency=request.refresh_frequency,
+                    next_refresh=next_refresh
+                )
+                # Register scheduler job in case it's not running
+                schedule_playlist_refresh()
+
+            scheduler_logger.info(f"📅 Updated refresh schedule for playlist ID: {playlist_id} to {request.refresh_frequency}, next: {next_refresh.isoformat()}")
+            return {
+                "message": "Playlist settings updated",
+                "refresh_frequency": request.refresh_frequency,
+                "next_refresh": next_refresh.isoformat()
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update playlist settings: {str(e)}")
 
 @app.get("/api/recipes")
 async def get_available_recipes():

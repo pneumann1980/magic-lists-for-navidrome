@@ -1095,36 +1095,190 @@ function truncateText(text, maxLength) {
 
 function renderPlaylists(playlists) {
     const container = document.getElementById('playlists-container');
-    
+
     container.innerHTML = playlists.map(playlist => {
+        const hasSchedule = playlist.refresh_frequency && playlist.refresh_frequency !== 'none';
+        const escapedName = playlist.playlist_name.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+
         return `
-            <div class="flex items-start justify-between p-4 border border-gray-200 rounded-lg mb-4">
-                <div class="flex-grow">
-                    <h3 class="text-lg font-semibold text-gray-900 mb-1">${playlist.playlist_name}</h3>
-                    <div class="text-sm text-gray-600 mb-2 space-y-1">
-                        <p class="mb-0">
-                            ${playlist.track_count || 0} tracks • 
-                            Refreshes ${playlist.refresh_frequency || 'manually'} • 
-                            ${playlist.next_refresh ? `Next refresh ${formatNextRefresh(playlist.next_refresh)}` : 'No scheduled refresh'}
-                        </p>
-                        <p class="mb-0">
-                            Created ${formatFriendlyDate(playlist.created_at)} • 
-                            ${playlist.last_refreshed ? `Refreshed ${formatFriendlyDate(playlist.last_refreshed)}` : 'Not refreshed yet'}
-                        </p>
+            <div class="border border-gray-200 rounded-lg mb-4 overflow-hidden" id="playlist-card-${playlist.id}">
+                <div class="flex items-start justify-between p-4">
+                    <div class="flex-grow min-w-0">
+                        <h3 class="text-lg font-semibold text-gray-900 mb-1">${playlist.playlist_name}</h3>
+                        <div class="text-sm text-gray-600 mb-2 space-y-1">
+                            <p class="mb-0">
+                                ${playlist.track_count || 0} tracks •
+                                Refreshes <span id="freq-label-${playlist.id}">${playlist.refresh_frequency || 'manually'}</span> •
+                                <span id="next-refresh-label-${playlist.id}">${playlist.next_refresh ? `Next ${formatNextRefresh(playlist.next_refresh)}` : 'No scheduled refresh'}</span>
+                            </p>
+                            <p class="mb-0">
+                                Created ${formatFriendlyDate(playlist.created_at)} •
+                                <span id="last-refreshed-label-${playlist.id}">${playlist.last_refreshed ? `Refreshed ${formatFriendlyDate(playlist.last_refreshed)}` : 'Not refreshed yet'}</span>
+                            </p>
+                        </div>
+                        ${playlist.reasoning ? `<p class="text-sm text-gray-600 m-0 mt-2 italic">${truncateText(playlist.reasoning, 140)}</p>` : ''}
                     </div>
-                    ${playlist.reasoning ? `<p class="text-sm text-gray-600 m-0 mt-2 italic">${truncateText(playlist.reasoning, 140)}</p>` : ''}
+                    <div class="flex-none flex flex-col items-end gap-1 ml-4">
+                        ${hasSchedule ? `
+                        <button
+                            id="refresh-btn-${playlist.id}"
+                            onclick="refreshPlaylistNow(${playlist.id}, '${escapedName}')"
+                            class="text-sm font-medium cursor-pointer border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 rounded px-2 py-1 whitespace-nowrap"
+                        >
+                            Refresh Now
+                        </button>
+                        ` : ''}
+                        <button
+                            onclick="toggleModifyPanel(${playlist.id})"
+                            class="text-sm font-medium cursor-pointer border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 rounded px-2 py-1 whitespace-nowrap"
+                        >
+                            Modify
+                        </button>
+                        <button
+                            onclick="deletePlaylist(${playlist.id}, '${escapedName}')"
+                            class="text-sm font-medium cursor-pointer border-none bg-transparent text-red-600 hover:text-red-800 px-2 py-1 whitespace-nowrap"
+                        >
+                            Delete
+                        </button>
+                    </div>
                 </div>
-                <div class="flex-none">
-                    <button
-                        onclick="deletePlaylist(${playlist.id}, '${playlist.playlist_name}')"
-                        class="text-sm font-medium underline cursor-pointer border-none bg-transparent text-red-600 hover:text-red-800 px-2 py-1"
-                    >
-                        Delete
-                    </button>
+                <!-- Inline modify panel (hidden by default) -->
+                <div id="modify-panel-${playlist.id}" class="hidden border-t border-gray-100 bg-gray-50 px-4 py-3">
+                    <p class="text-sm font-medium text-gray-700 mb-2">Refresh frequency</p>
+                    <div class="flex flex-wrap items-center gap-2">
+                        <select
+                            id="freq-select-${playlist.id}"
+                            class="text-sm border border-gray-200 rounded-lg px-3 py-2 bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                        >
+                            <option value="none" ${(!playlist.refresh_frequency || playlist.refresh_frequency === 'none') ? 'selected' : ''}>No auto-refresh</option>
+                            <option value="daily" ${playlist.refresh_frequency === 'daily' ? 'selected' : ''}>Daily</option>
+                            <option value="weekly" ${playlist.refresh_frequency === 'weekly' ? 'selected' : ''}>Weekly</option>
+                            <option value="monthly" ${playlist.refresh_frequency === 'monthly' ? 'selected' : ''}>Monthly</option>
+                        </select>
+                        <button
+                            onclick="savePlaylistSettings(${playlist.id})"
+                            class="text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white rounded-lg px-4 py-2 cursor-pointer border-0"
+                        >
+                            Save
+                        </button>
+                        <button
+                            onclick="toggleModifyPanel(${playlist.id})"
+                            class="text-sm text-gray-500 hover:text-gray-700 cursor-pointer border-none bg-transparent px-2 py-2"
+                        >
+                            Cancel
+                        </button>
+                    </div>
                 </div>
             </div>
         `;
     }).join('');
+}
+
+function toggleModifyPanel(playlistId) {
+    const panel = document.getElementById(`modify-panel-${playlistId}`);
+    if (panel) {
+        panel.classList.toggle('hidden');
+    }
+}
+
+async function savePlaylistSettings(playlistId) {
+    const select = document.getElementById(`freq-select-${playlistId}`);
+    if (!select) return;
+
+    const newFrequency = select.value;
+
+    try {
+        const response = await fetch(`/api/playlists/${playlistId}/settings`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ refresh_frequency: newFrequency })
+        });
+
+        if (!response.ok) {
+            const err = await response.json().catch(() => ({ detail: 'Unknown error' }));
+            throw new Error(err.detail || 'Failed to save settings');
+        }
+
+        const data = await response.json();
+
+        // Update labels in place without a full reload
+        const freqLabel = document.getElementById(`freq-label-${playlistId}`);
+        const nextLabel = document.getElementById(`next-refresh-label-${playlistId}`);
+        const card = document.getElementById(`playlist-card-${playlistId}`);
+
+        if (freqLabel) freqLabel.textContent = newFrequency === 'none' ? 'manually' : newFrequency;
+
+        if (nextLabel) {
+            if (data.next_refresh) {
+                nextLabel.textContent = `Next ${formatNextRefresh(data.next_refresh)}`;
+            } else {
+                nextLabel.textContent = 'No scheduled refresh';
+            }
+        }
+
+        // Show/hide the Refresh Now button based on new frequency
+        const refreshBtn = document.getElementById(`refresh-btn-${playlistId}`);
+        const actionsDiv = refreshBtn ? refreshBtn.parentElement : null;
+        if (actionsDiv) {
+            if (newFrequency !== 'none' && !refreshBtn) {
+                // Re-render to show the Refresh Now button (simplest approach)
+                loadPlaylists();
+                return;
+            } else if (newFrequency === 'none' && refreshBtn) {
+                refreshBtn.remove();
+            }
+        }
+
+        // Hide the panel
+        toggleModifyPanel(playlistId);
+        showToast('success', 'Refresh settings updated successfully');
+
+    } catch (error) {
+        console.error('Error saving playlist settings:', error);
+        showToast('error', error.message);
+    }
+}
+
+async function refreshPlaylistNow(playlistId, playlistName) {
+    const btn = document.getElementById(`refresh-btn-${playlistId}`);
+    const originalText = btn ? btn.textContent : 'Refresh Now';
+
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Refreshing…';
+        btn.classList.add('opacity-60', 'cursor-not-allowed');
+    }
+
+    const toastId = showToast('loading', `Refreshing "${playlistName}"… This may take a minute.`, 0);
+
+    try {
+        const response = await fetch(`/api/playlists/${playlistId}/refresh`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        });
+
+        if (!response.ok) {
+            const err = await response.json().catch(() => ({ detail: 'Unknown error' }));
+            throw new Error(err.detail || 'Failed to refresh playlist');
+        }
+
+        hideToast(toastId);
+        showToast('success', `"${playlistName}" has been refreshed successfully!`);
+
+        // Update the "last refreshed" label by reloading playlist list
+        loadPlaylists();
+
+    } catch (error) {
+        console.error('Error refreshing playlist:', error);
+        hideToast(toastId);
+        showToast('error', error.message);
+
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = originalText;
+            btn.classList.remove('opacity-60', 'cursor-not-allowed');
+        }
+    }
 }
 
 async function deletePlaylist(playlistId, playlistName) {

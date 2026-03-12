@@ -633,6 +633,66 @@ class DatabaseManager:
             await db.commit()
             return deleted_count
 
+    async def get_scheduled_playlist_by_navidrome_id(self, navidrome_playlist_id: str) -> Optional[ScheduledPlaylist]:
+        """Get a scheduled playlist by its Navidrome playlist ID"""
+        await self.init_db()
+
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute("""
+                SELECT id, playlist_type, navidrome_playlist_id, refresh_frequency, next_refresh, created_at, updated_at
+                FROM scheduled_playlists
+                WHERE navidrome_playlist_id = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+            """, (navidrome_playlist_id,)) as cursor:
+                row = await cursor.fetchone()
+
+                if row:
+                    return ScheduledPlaylist(
+                        id=row[0],
+                        playlist_type=row[1],
+                        navidrome_playlist_id=row[2],
+                        refresh_frequency=row[3],
+                        next_refresh=row[4],
+                        created_at=row[5],
+                        updated_at=row[6]
+                    )
+        return None
+
+    async def update_scheduled_playlist_settings(self, navidrome_playlist_id: str, refresh_frequency: str, next_refresh: datetime) -> bool:
+        """Update the refresh frequency and next refresh time for a scheduled playlist"""
+        await self.init_db()
+
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("""
+                UPDATE scheduled_playlists
+                SET refresh_frequency = ?, next_refresh = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE navidrome_playlist_id = ?
+            """, (refresh_frequency, next_refresh.isoformat(), navidrome_playlist_id))
+
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def delete_duplicate_scheduled_playlists(self, navidrome_playlist_id: str) -> int:
+        """Delete duplicate scheduled_playlists rows, keeping only the most recent one"""
+        await self.init_db()
+
+        async with aiosqlite.connect(self.db_path) as db:
+            # Delete all rows except the most recently created one
+            cursor = await db.execute("""
+                DELETE FROM scheduled_playlists
+                WHERE navidrome_playlist_id = ?
+                AND id NOT IN (
+                    SELECT id FROM scheduled_playlists
+                    WHERE navidrome_playlist_id = ?
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                )
+            """, (navidrome_playlist_id, navidrome_playlist_id))
+
+            await db.commit()
+            return cursor.rowcount
+
 # Dependency for FastAPI
 async def get_db() -> DatabaseManager:
     """FastAPI dependency to get database manager"""

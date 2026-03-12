@@ -107,3 +107,7 @@ class PlaylistWithScheduleInfo(BaseModel):
     refresh_frequency: Optional[str] = None
     next_refresh: Optional[str] = None
     playlist_type: Optional[str] = None
+
+class UpdatePlaylistSettingsRequest(BaseModel):
+    """Request schema for updating playlist refresh settings"""
+    refresh_frequency: str  # "none", "daily", "weekly", "monthly"
