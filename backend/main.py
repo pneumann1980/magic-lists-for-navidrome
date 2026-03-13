@@ -1010,10 +1010,12 @@ async def refresh_scheduled_playlists():
                 scheduler_logger.info(f"🕐 Catching up on overdue playlist {scheduled_playlist.navidrome_playlist_id} (missed by {overdue_hours:.1f} hours)")
 
             try:
-                if scheduled_playlist.playlist_type == "rediscover":
+                if scheduled_playlist.playlist_type in ("rediscover", "rediscover_weekly_v2"):
                     await refresh_rediscover_playlist(scheduled_playlist, db)
                 elif scheduled_playlist.playlist_type == "this_is":
                     await refresh_this_is_playlist(scheduled_playlist, db)
+                elif scheduled_playlist.playlist_type == "genre_mix":
+                    await refresh_genre_mix_playlist(scheduled_playlist, db)
                 else:
                     scheduler_logger.warning(f"⚠️ Unknown playlist type '{scheduled_playlist.playlist_type}' for {scheduled_playlist.navidrome_playlist_id} – skipping")
             except Exception as playlist_err:
@@ -1252,6 +1254,109 @@ async def refresh_this_is_playlist(scheduled_playlist, db: DatabaseManager):
     except Exception as e:
         scheduler_logger.error(f"❌ Error refreshing This Is playlist {scheduled_playlist.navidrome_playlist_id}: {e}")
 
+async def refresh_genre_mix_playlist(scheduled_playlist, db: DatabaseManager):
+    """Refresh a specific Genre Mix playlist"""
+    try:
+        scheduler_logger.info(f"🔄 Starting refresh for Genre Mix playlist ID: {scheduled_playlist.navidrome_playlist_id} (frequency: {scheduled_playlist.refresh_frequency})")
+
+        # Get clients
+        nav_client = get_navidrome_client()
+        ai_client_instance = get_ai_client()
+
+        # Find the original playlist — genre is stored in the artist_id field
+        playlists = await db.get_all_playlists_with_schedule_info()
+        original_playlist = next((p for p in playlists if p.get("navidrome_playlist_id") == scheduled_playlist.navidrome_playlist_id), None)
+
+        if not original_playlist:
+            scheduler_logger.error(f"❌ Could not find original playlist data for {scheduled_playlist.navidrome_playlist_id}")
+            return
+
+        genre = original_playlist["artist_id"]  # genre is stored as artist_id for genre_mix playlists
+
+        # FRESH DATA: Re-fetch ALL tracks for the genre
+        all_tracks = await nav_client.get_tracks_by_genre(genre)
+
+        if not all_tracks:
+            scheduler_logger.warning(f"⚠️ No tracks found for genre '{genre}' in playlist {scheduled_playlist.navidrome_playlist_id}")
+            return
+
+        scheduler_logger.info(f"🎵 Found {len(all_tracks)} tracks for genre: {genre} (fresh data)")
+
+        # ENFORCE original playlist length
+        original_length = original_playlist.get("playlist_length", 25)
+        scheduler_logger.info(f"🎯 ENFORCING original playlist length: {original_length}")
+
+        if len(all_tracks) < original_length:
+            scheduler_logger.warning(f"⚠️ Genre only has {len(all_tracks)} tracks, but user requested {original_length}. Using all available tracks.")
+            original_length = len(all_tracks)
+
+        # Apply smart filtering to optimise LLM payload
+        library_stats = await nav_client.get_library_stats()
+        filtered_tracks, filter_metadata = filter_tracks_for_this_is_playlist(
+            source_tracks=all_tracks,
+            target_playlist_size=original_length,
+            library_stats=library_stats
+        )
+        if filter_metadata['filtered']:
+            scheduler_logger.info(f"🎯 Smart filtering applied: {filter_metadata['source_count']} → {filter_metadata['sent_count']} tracks")
+
+        # Variety enforcement: tell the AI what was in the previous playlist
+        previous_songs = original_playlist.get("songs", [])
+        variety_instruction = (
+            f"REFRESH CONSTRAINT: This is a REFRESH, not a copy. Previous playlist had these tracks: "
+            f"{', '.join(previous_songs[:10])}. Create a completely different track selection and arrangement. "
+            f"Prioritize tracks NOT in the previous list. Tell a fresh musical story."
+        ) if previous_songs else "Create a fresh, engaging playlist arrangement."
+
+        curation_result = await ai_client_instance.curate_genre_mix(
+            genre=genre,
+            tracks_json=filtered_tracks,
+            num_tracks=original_length,
+            include_reasoning=True,
+            variety_context=variety_instruction
+        )
+
+        if isinstance(curation_result, tuple):
+            curated_track_ids, reasoning = curation_result
+        else:
+            curated_track_ids = curation_result
+            reasoning = ""
+
+        if curated_track_ids:
+            # Fill any gap if AI returned fewer tracks than requested
+            if len(curated_track_ids) < original_length and len(all_tracks) >= original_length:
+                scheduler_logger.warning(f"⚠️ AI returned only {len(curated_track_ids)} tracks but user requested {original_length}. Filling gap.")
+                used_ids = set(curated_track_ids)
+                remaining = [t for t in all_tracks if t["id"] not in used_ids]
+                curated_track_ids.extend([t["id"] for t in remaining[:original_length - len(curated_track_ids)]])
+
+            scheduler_logger.info(f"🎯 Final track count: {len(curated_track_ids)} (requested: {original_length})")
+
+            await nav_client.update_playlist(
+                playlist_id=scheduled_playlist.navidrome_playlist_id,
+                track_ids=curated_track_ids,
+                comment=reasoning if reasoning else None
+            )
+
+            track_id_to_title = {track["id"]: track["title"] for track in all_tracks}
+            track_titles = [track_id_to_title[tid] for tid in curated_track_ids if tid in track_id_to_title]
+
+            await db.update_playlist_content(
+                navidrome_playlist_id=scheduled_playlist.navidrome_playlist_id,
+                songs=track_titles,
+                reasoning=reasoning
+            )
+
+            next_refresh = calculate_next_refresh(scheduled_playlist.refresh_frequency)
+            await db.update_scheduled_playlist_next_refresh(scheduled_playlist.id, next_refresh)
+
+            scheduler_logger.info(f"✅ Successfully refreshed Genre Mix playlist {scheduled_playlist.navidrome_playlist_id}. Next refresh: {next_refresh.strftime('%Y-%m-%d %H:%M:%S')}")
+        else:
+            scheduler_logger.warning(f"⚠️ No curated tracks generated for Genre Mix playlist {scheduled_playlist.navidrome_playlist_id}")
+
+    except Exception as e:
+        scheduler_logger.error(f"❌ Error refreshing Genre Mix playlist {scheduled_playlist.navidrome_playlist_id}: {e}")
+
 @app.get("/api/playlists")
 async def get_all_playlists(db: DatabaseManager = Depends(get_db)):
     """Get all playlists with scheduling information"""
@@ -1334,10 +1439,12 @@ async def refresh_playlist_now(playlist_id: int, db: DatabaseManager = Depends(g
 
         scheduler_logger.info(f"🔄 Manual refresh requested for playlist ID: {playlist_id} (type: {playlist_type})")
 
-        if scheduled.playlist_type == "rediscover":
+        if scheduled.playlist_type in ("rediscover", "rediscover_weekly_v2"):
             await refresh_rediscover_playlist(scheduled, db)
         elif scheduled.playlist_type == "this_is":
             await refresh_this_is_playlist(scheduled, db)
+        elif scheduled.playlist_type == "genre_mix":
+            await refresh_genre_mix_playlist(scheduled, db)
         else:
             raise HTTPException(status_code=400, detail=f"Unsupported playlist type for refresh: {scheduled.playlist_type}")
 
@@ -1389,7 +1496,12 @@ async def update_playlist_settings(playlist_id: int, request: UpdatePlaylistSett
                 if not playlist_type:
                     # Infer type from playlist name as fallback
                     playlist_name = playlist.get("playlist_name", "")
-                    playlist_type = "rediscover" if "Re-Discover" in playlist_name else "this_is"
+                    if "Re-Discover" in playlist_name:
+                        playlist_type = "rediscover"
+                    elif "Genre Mix" in playlist_name:
+                        playlist_type = "genre_mix"
+                    else:
+                        playlist_type = "this_is"
 
                 await db.create_scheduled_playlist(
                     playlist_type=playlist_type,
