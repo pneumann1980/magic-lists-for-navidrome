@@ -157,12 +157,8 @@ class AIProvider:
         {user_prompt}
         """
 
-        # For genre mix, responses are small JSON, so cap output tokens reasonably
-        if "Genre Mix" in system_prompt or "genre_mix" in user_prompt.lower():
-            # max_output = 2500  # Genre mix responses are ~500 tokens
-            max_output = min(int(max_tokens), 16000)
-        else:
-            max_output = min(int(max_tokens), 16000)
+        # gemini-2.5-flash supports up to 65536 output tokens
+        max_output = min(int(max_tokens), 65536)
 
         generation_config = {
             "temperature": temperature,

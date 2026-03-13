@@ -757,7 +757,7 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
             # Use model from environment (.env file), ignoring recipe model_name
             model = self.model or "openai/gpt-3.5-turbo"
             temperature = llm_config.get("temperature", 0.7)
-            max_tokens = llm_config.get("max_output_tokens", 16000)
+            max_tokens = llm_config.get("max_output_tokens", 32000)
 
             print(f"🤖 Using AI model: {model} (from {self.provider.provider_type} provider)")
 
