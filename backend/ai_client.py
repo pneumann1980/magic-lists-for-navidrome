@@ -1009,6 +1009,306 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
         else:
             return track_ids
 
+    async def _curate_with_recipe(
+        self,
+        recipe_key: str,
+        model_instructions: str,
+        user_content: str,
+        tracks_json: List[Dict[str, Any]],
+        num_tracks: int,
+        include_reasoning: bool,
+        fallback_fn
+    ) -> Union[List[str], Tuple[List[str], str]]:
+        """Shared AI call, parse, and index-map logic for all curate_* methods"""
+        import random
+        import re
+
+        shuffled_tracks = tracks_json.copy()
+        random.shuffle(shuffled_tracks)
+
+        # Build index map
+        track_id_map = []
+        indexed_tracks = []
+        for index, track in enumerate(shuffled_tracks):
+            track_id_map.append(track["id"])
+            indexed_tracks.append({
+                "index": index,
+                "track_name": track.get("title", "Unknown"),
+                "artist": track.get("artist", "Unknown"),
+                "album": track.get("album", "Unknown"),
+                "year": track.get("year", 0),
+                "play_count": track.get("play_count", 0),
+                "local_library_likes": track.get("local_library_likes", False),
+            })
+
+        # Substitute indexed tracks into user_content
+        final_user_content = user_content.replace("__INDEXED_TRACKS__", json.dumps(indexed_tracks, separators=(',', ':'), ensure_ascii=False))
+
+        try:
+            recipe = recipe_manager.get_recipe(recipe_key)
+            llm_config = recipe.get("llm_config", {})
+            model = self.model or "openai/gpt-3.5-turbo"
+            temperature = llm_config.get("temperature", 0.7)
+            max_tokens = llm_config.get("max_output_tokens", 16000)
+
+            print(f"🤖 {recipe_key}: sending {len(indexed_tracks)} tracks to AI")
+
+            content = await self.provider.generate(
+                system_prompt=model_instructions,
+                user_prompt=final_user_content,
+                max_tokens=max_tokens,
+                temperature=temperature
+            )
+
+            print(f"🤖 FULL RAW AI RESPONSE for {recipe_key}: {content[:500]}")
+
+            # Parse response
+            cleaned = content.strip()
+            for fence in ("```json", "```"):
+                if cleaned.startswith(fence):
+                    cleaned = cleaned[len(fence):]
+            if cleaned.endswith("```"):
+                cleaned = cleaned[:-3]
+            cleaned = cleaned.strip()
+
+            json_match = re.search(r'\{.*?"track_ids".*?\}', cleaned, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(0)
+            else:
+                json_str = cleaned
+
+            # Clean JSON
+            lines = json_str.split('\n')
+            cleaned_lines = []
+            for line in lines:
+                if '//' in line and 'http://' not in line and 'https://' not in line:
+                    line = line[:line.find('//')].rstrip()
+                line = re.sub(r',(\s*[\]}])', r'\1', line)
+                if line.strip():
+                    cleaned_lines.append(line)
+            final_json = '\n'.join(cleaned_lines).strip()
+
+            response_data = json.loads(final_json)
+
+            if isinstance(response_data, dict) and "track_ids" in response_data:
+                track_ids = response_data.get("track_ids", [])
+                reasoning = response_data.get("reasoning", "")
+
+                if not isinstance(track_ids, list):
+                    raise ValueError("track_ids must be a list")
+                if not all(isinstance(tid, int) for tid in track_ids):
+                    raise ValueError("all track_ids must be integers (indices)")
+                if len(track_ids) == 0:
+                    raise ValueError("AI returned no tracks")
+                if len(track_ids) > int(num_tracks * 1.5):
+                    raise ValueError(f"AI returned too many tracks: {len(track_ids)}")
+
+                valid_indices = [idx for idx in track_ids if 0 <= idx < len(track_id_map)]
+                mapped_ids = [track_id_map[idx] for idx in valid_indices]
+                final_selection = mapped_ids[:num_tracks]
+
+                print(f"✅ {recipe_key}: {len(final_selection)} tracks curated")
+
+                if include_reasoning:
+                    return final_selection, reasoning
+                else:
+                    return final_selection
+            else:
+                raise ValueError("Response missing track_ids")
+
+        except (json.JSONDecodeError, ValueError) as e:
+            print(f"❌ {recipe_key}: parse error: {e}")
+            return fallback_fn(tracks_json, num_tracks, include_reasoning)
+        except Exception as e:
+            import traceback
+            print(f"💥 {recipe_key}: unexpected error: {e}\n{traceback.format_exc()}")
+            return fallback_fn(tracks_json, num_tracks, include_reasoning)
+
+    async def curate_multi_artist_radio(
+        self,
+        artist_names: List[str],
+        tracks_json: List[Dict[str, Any]],
+        num_tracks: int = 30,
+        include_reasoning: bool = True,
+        variety_context: Optional[str] = None
+    ) -> Union[List[str], Tuple[List[str], str]]:
+        """Curate a Multi-Artist Radio Blend playlist"""
+        if not self.api_key and self.provider.provider_type == "openrouter":
+            sorted_tracks = sorted(tracks_json, key=lambda x: x.get("play_count", 0), reverse=True)
+            track_ids = [t["id"] for t in sorted_tracks[:num_tracks]]
+            reasoning = f"Fallback: top {len(track_ids)} tracks by play count. No AI key configured."
+            return (track_ids, reasoning) if include_reasoning else track_ids
+
+        recipe = recipe_manager.get_recipe("multi_artist_radio")
+        artist_names_str = ", ".join(artist_names)
+        model_instructions = (
+            recipe.get("model_instructions", "")
+            .replace("{{ARTIST_NAMES}}", artist_names_str)
+            .replace("{{DESIRED_TRACK_COUNT}}", str(num_tracks))
+        )
+        if variety_context:
+            model_instructions += f"\n\n{variety_context}"
+
+        user_content = f'Select {num_tracks} tracks for a radio blend of {artist_names_str}.\n\nTracks: __INDEXED_TRACKS__\n\nReturn JSON: {{"track_ids": [indices], "reasoning": "summary"}}'
+
+        def fallback(tracks, n, inc_r):
+            s = sorted(tracks, key=lambda x: x.get("play_count", 0), reverse=True)
+            ids = [t["id"] for t in s[:n]]
+            r = f"Fallback: top {len(ids)} tracks by play count."
+            return (ids, r) if inc_r else ids
+
+        return await self._curate_with_recipe("multi_artist_radio", model_instructions, user_content, tracks_json, num_tracks, include_reasoning, fallback)
+
+    async def curate_multi_genre_mix(
+        self,
+        genre_names: List[str],
+        tracks_json: List[Dict[str, Any]],
+        num_tracks: int = 30,
+        include_reasoning: bool = True,
+        variety_context: Optional[str] = None
+    ) -> Union[List[str], Tuple[List[str], str]]:
+        """Curate a Multi-Genre Mix playlist"""
+        if not self.api_key and self.provider.provider_type == "openrouter":
+            sorted_tracks = sorted(tracks_json, key=lambda x: x.get("play_count", 0), reverse=True)
+            track_ids = [t["id"] for t in sorted_tracks[:num_tracks]]
+            reasoning = f"Fallback: top {len(track_ids)} tracks by play count. No AI key configured."
+            return (track_ids, reasoning) if include_reasoning else track_ids
+
+        recipe = recipe_manager.get_recipe("multi_genre_mix")
+        genre_names_str = ", ".join(genre_names)
+        model_instructions = (
+            recipe.get("model_instructions", "")
+            .replace("{{GENRE_NAMES}}", genre_names_str)
+            .replace("{{DESIRED_TRACK_COUNT}}", str(num_tracks))
+        )
+        if variety_context:
+            model_instructions += f"\n\n{variety_context}"
+
+        user_content = f'Select {num_tracks} tracks for a multi-genre mix of {genre_names_str}.\n\nTracks: __INDEXED_TRACKS__\n\nReturn JSON: {{"track_ids": [indices], "reasoning": "summary"}}'
+
+        def fallback(tracks, n, inc_r):
+            s = sorted(tracks, key=lambda x: x.get("play_count", 0), reverse=True)
+            ids = [t["id"] for t in s[:n]]
+            r = f"Fallback: top {len(ids)} tracks by play count."
+            return (ids, r) if inc_r else ids
+
+        return await self._curate_with_recipe("multi_genre_mix", model_instructions, user_content, tracks_json, num_tracks, include_reasoning, fallback)
+
+    async def curate_decade_discovery(
+        self,
+        decades: List[str],
+        mode: str,
+        tracks_json: List[Dict[str, Any]],
+        num_tracks: int = 30,
+        include_reasoning: bool = True,
+        variety_context: Optional[str] = None
+    ) -> Union[List[str], Tuple[List[str], str]]:
+        """Curate a Decade & Discovery playlist"""
+        if not self.api_key and self.provider.provider_type == "openrouter":
+            reverse = (mode != "Discovery")
+            sorted_tracks = sorted(tracks_json, key=lambda x: x.get("play_count", 0), reverse=reverse)
+            track_ids = [t["id"] for t in sorted_tracks[:num_tracks]]
+            reasoning = f"Fallback: top {len(track_ids)} tracks. No AI key configured."
+            return (track_ids, reasoning) if include_reasoning else track_ids
+
+        recipe = recipe_manager.get_recipe("decade_discovery")
+        decades_str = ", ".join(decades)
+        model_instructions = (
+            recipe.get("model_instructions", "")
+            .replace("{{DECADE_LABELS}}", decades_str)
+            .replace("{{MODE}}", mode)
+            .replace("{{DESIRED_TRACK_COUNT}}", str(num_tracks))
+        )
+        if variety_context:
+            model_instructions += f"\n\n{variety_context}"
+
+        user_content = f'Select {num_tracks} tracks for a {decades_str} decade playlist in {mode} mode.\n\nTracks: __INDEXED_TRACKS__\n\nReturn JSON: {{"track_ids": [indices], "reasoning": "summary"}}'
+
+        def fallback(tracks, n, inc_r):
+            reverse = (mode != "Discovery")
+            s = sorted(tracks, key=lambda x: x.get("play_count", 0), reverse=reverse)
+            ids = [t["id"] for t in s[:n]]
+            r = f"Fallback: tracks sorted by play count ({'desc' if reverse else 'asc'})."
+            return (ids, r) if inc_r else ids
+
+        return await self._curate_with_recipe("decade_discovery", model_instructions, user_content, tracks_json, num_tracks, include_reasoning, fallback)
+
+    async def curate_sonic_journey(
+        self,
+        start_artist: str,
+        end_artist: str,
+        tracks_json: List[Dict[str, Any]],
+        num_tracks: int = 30,
+        include_reasoning: bool = True,
+        variety_context: Optional[str] = None
+    ) -> Union[List[str], Tuple[List[str], str]]:
+        """Curate a Sonic Journey playlist from start_artist to end_artist"""
+        if not self.api_key and self.provider.provider_type == "openrouter":
+            sorted_tracks = sorted(tracks_json, key=lambda x: x.get("play_count", 0), reverse=True)
+            track_ids = [t["id"] for t in sorted_tracks[:num_tracks]]
+            reasoning = f"Fallback: top {len(track_ids)} tracks. No AI key configured."
+            return (track_ids, reasoning) if include_reasoning else track_ids
+
+        recipe = recipe_manager.get_recipe("sonic_journey")
+        model_instructions = (
+            recipe.get("model_instructions", "")
+            .replace("{{START_ARTIST}}", start_artist)
+            .replace("{{END_ARTIST}}", end_artist)
+            .replace("{{DESIRED_TRACK_COUNT}}", str(num_tracks))
+        )
+        if variety_context:
+            model_instructions += f"\n\n{variety_context}"
+
+        user_content = f'Select {num_tracks} tracks for a sonic journey from {start_artist} to {end_artist}.\n\nTracks: __INDEXED_TRACKS__\n\nReturn JSON: {{"track_ids": [indices], "reasoning": "summary"}}'
+
+        def fallback(tracks, n, inc_r):
+            s = sorted(tracks, key=lambda x: x.get("play_count", 0), reverse=True)
+            ids = [t["id"] for t in s[:n]]
+            r = f"Fallback: top {len(ids)} tracks by play count."
+            return (ids, r) if inc_r else ids
+
+        return await self._curate_with_recipe("sonic_journey", model_instructions, user_content, tracks_json, num_tracks, include_reasoning, fallback)
+
+    async def curate_genre_archaeology(
+        self,
+        genre: str,
+        dig_depth: str,
+        tracks_json: List[Dict[str, Any]],
+        num_tracks: int = 30,
+        include_reasoning: bool = True,
+        variety_context: Optional[str] = None
+    ) -> Union[List[str], Tuple[List[str], str]]:
+        """Curate a Genre Archaeology playlist"""
+        if not self.api_key and self.provider.provider_type == "openrouter":
+            reverse = (dig_depth != "Deep")
+            sorted_tracks = sorted(tracks_json, key=lambda x: (x.get("year", 0) if dig_depth == "Deep" else x.get("play_count", 0)), reverse=reverse)
+            track_ids = [t["id"] for t in sorted_tracks[:num_tracks]]
+            reasoning = f"Fallback: tracks sorted for {dig_depth} dig. No AI key configured."
+            return (track_ids, reasoning) if include_reasoning else track_ids
+
+        recipe = recipe_manager.get_recipe("genre_archaeology")
+        model_instructions = (
+            recipe.get("model_instructions", "")
+            .replace("{{TARGET_GENRE}}", genre)
+            .replace("{{DIG_DEPTH}}", dig_depth)
+            .replace("{{DESIRED_TRACK_COUNT}}", str(num_tracks))
+        )
+        if variety_context:
+            model_instructions += f"\n\n{variety_context}"
+
+        user_content = f'Select {num_tracks} tracks for a {dig_depth} genre archaeology of {genre}.\n\nTracks: __INDEXED_TRACKS__\n\nReturn JSON: {{"track_ids": [indices], "reasoning": "summary"}}'
+
+        def fallback(tracks, n, inc_r):
+            if dig_depth == "Deep":
+                s = sorted(tracks, key=lambda x: x.get("year", 0))
+            else:
+                s = sorted(tracks, key=lambda x: x.get("play_count", 0), reverse=True)
+            ids = [t["id"] for t in s[:n]]
+            r = f"Fallback: tracks sorted for {dig_depth} dig."
+            return (ids, r) if inc_r else ids
+
+        return await self._curate_with_recipe("genre_archaeology", model_instructions, user_content, tracks_json, num_tracks, include_reasoning, fallback)
+
     async def close(self):
         """Close the HTTP client"""
         try:

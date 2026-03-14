@@ -111,3 +111,46 @@ class PlaylistWithScheduleInfo(BaseModel):
 class UpdatePlaylistSettingsRequest(BaseModel):
     """Request schema for updating playlist refresh settings"""
     refresh_frequency: str  # "none", "daily", "weekly", "monthly"
+
+class CreateMultiArtistRadioRequest(BaseModel):
+    """Request schema for creating a Multi-Artist Radio Blend playlist"""
+    artist_ids: List[str]
+    playlist_name: Optional[str] = None
+    refresh_frequency: str = "none"
+    playlist_length: int = 30
+    library_ids: List[str] = []
+
+class CreateMultiGenreMixRequest(BaseModel):
+    """Request schema for creating a Multi-Genre Mix playlist"""
+    genres: List[str]
+    playlist_name: Optional[str] = None
+    refresh_frequency: str = "none"
+    playlist_length: int = 30
+    library_ids: List[str] = []
+
+class CreateDecadeDiscoveryRequest(BaseModel):
+    """Request schema for creating a Decade & Discovery playlist"""
+    decades: List[str]
+    mode: str = "Blend"
+    playlist_name: Optional[str] = None
+    refresh_frequency: str = "none"
+    playlist_length: int = 30
+    library_ids: List[str] = []
+
+class CreateSonicJourneyRequest(BaseModel):
+    """Request schema for creating a Sonic Journey playlist"""
+    start_artist_id: str
+    end_artist_id: str
+    playlist_name: Optional[str] = None
+    refresh_frequency: str = "none"
+    playlist_length: int = 30
+    library_ids: List[str] = []
+
+class CreateGenreArchaeologyRequest(BaseModel):
+    """Request schema for creating a Genre Archaeology playlist"""
+    genre: str
+    dig_depth: str = "Medium"
+    playlist_name: Optional[str] = None
+    refresh_frequency: str = "none"
+    playlist_length: int = 30
+    library_ids: List[str] = []

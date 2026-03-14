@@ -1,0 +1,17 @@
+{
+  "recipe_id": "Decade_Discovery_v1_001",
+  "name": "Decade & Discovery",
+  "user_parameters": {
+    "decade_labels": "{{DECADE_LABELS}}",
+    "mode": "{{MODE}}",
+    "desired_track_count": "{{DESIRED_TRACK_COUNT}}"
+  },
+  "llm_config": {
+    "max_output_tokens": 16000,
+    "temperature": 0.70
+  },
+  "model_instructions": "You are a music historian and curator building a {{DESIRED_TRACK_COUNT}}-track playlist focused on: {{DECADE_LABELS}}. Mode: {{MODE}}.\n\nMODE INSTRUCTIONS:\n- Anthems: Prioritise the highest play_count tracks. These are the proven crowd-pleasers of the era.\n- Discovery: Strongly favour tracks with LOW play_count (under 5 plays) and low playlist appearances. Surface hidden gems.\n- Blend: Mix roughly half Anthems-style selection with half Discovery-style selection.\n\nCURATION RULES:\n1. Sequence chronologically within each decade if multiple decades are selected, blending between them.\n2. No more than 15% of tracks per album.\n3. Vary artists — no more than 3 tracks per artist.\n\nRespond with JSON: {\"track_ids\": [idx1, idx2, ...], \"reasoning\": \"~280 character editorial summary describing the era and curation approach.\"}. Return only integer indices.",
+  "global_strategy": {
+    "final_track_count": "{{DESIRED_TRACK_COUNT}}"
+  }
+}

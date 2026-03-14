@@ -3,5 +3,10 @@
   "re_discover": "re_discover_phase2_v2.json",
   "genre_mix": "genre_mix_v1_001.json",
   "re_discover_phase1_v2": "re_discover_phase1_v2.json",
-  "re_discover_phase2_v2": "re_discover_phase2_v2.json"
+  "re_discover_phase2_v2": "re_discover_phase2_v2.json",
+  "multi_artist_radio": "multi_artist_radio_v1_001.json",
+  "multi_genre_mix": "multi_genre_mix_v1_001.json",
+  "decade_discovery": "decade_discovery_v1_001.json",
+  "sonic_journey": "sonic_journey_v1_001.json",
+  "genre_archaeology": "genre_archaeology_v1_001.json"
 }
