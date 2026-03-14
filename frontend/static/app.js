@@ -1561,6 +1561,21 @@ function updateURL(page) {
         case 'terms':
             url = '/terms';
             break;
+        case 'multi-artist-radio':
+            url = '/multi-artist-radio';
+            break;
+        case 'multi-genre-mix':
+            url = '/multi-genre-mix';
+            break;
+        case 'decade-discovery':
+            url = '/decade-discovery';
+            break;
+        case 'sonic-journey':
+            url = '/sonic-journey';
+            break;
+        case 'genre-archaeology':
+            url = '/genre-archaeology';
+            break;
         default:
             url = '/';
     }
@@ -1622,6 +1637,21 @@ function getPageFromURL(pathname) {
             break;
         case '/terms':
             page = 'terms';
+            break;
+        case '/multi-artist-radio':
+            page = 'multi-artist-radio';
+            break;
+        case '/multi-genre-mix':
+            page = 'multi-genre-mix';
+            break;
+        case '/decade-discovery':
+            page = 'decade-discovery';
+            break;
+        case '/sonic-journey':
+            page = 'sonic-journey';
+            break;
+        case '/genre-archaeology':
+            page = 'genre-archaeology';
             break;
         default:
             page = 'home';
