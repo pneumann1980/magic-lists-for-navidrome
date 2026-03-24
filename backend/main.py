@@ -1574,12 +1574,25 @@ async def refresh_this_is_playlist(scheduled_playlist, db: DatabaseManager):
                 scheduler_logger.warning(f"⚠️ Artist only has {len(tracks)} tracks, but user requested {original_length}. Using all available tracks.")
                 original_length = len(tracks)
             
-            # Get previous playlist songs for STRONG variety enforcement
+            # Get previous playlist songs for variety enforcement
             previous_songs = original_playlist.get("songs", [])
-            variety_instruction = f"REFRESH CONSTRAINT: This is a REFRESH, not a copy. Previous playlist had these tracks: {', '.join(previous_songs[:10])}. Create a completely different track selection and arrangement. Prioritize tracks NOT in the previous list. Tell a fresh musical story. Avoid identical opening sequences." if previous_songs else "Create a fresh, engaging playlist arrangement."
-            
-            # Prepare tracks with variety instruction - use a more direct approach
-            tracks_for_ai = tracks.copy()
+            previous_titles = set(previous_songs)
+
+            # Exclude previously used tracks at the data layer when there are
+            # enough remaining tracks to still fill the playlist.
+            tracks_without_previous = [t for t in tracks if t.get("title", "") not in previous_titles]
+            if len(tracks_without_previous) >= original_length:
+                tracks_for_ai = tracks_without_previous
+                scheduler_logger.info(f"🔄 Excluded {len(tracks) - len(tracks_without_previous)} previously-used tracks; {len(tracks_for_ai)} remaining")
+            else:
+                tracks_for_ai = tracks.copy()
+                scheduler_logger.info(f"🔄 Library too small to fully exclude previous tracks; using full set of {len(tracks_for_ai)}")
+
+            variety_instruction = (
+                f"REFRESH: This replaces a previous playlist. Keep the listening experience fresh — "
+                f"vary the mood, era mix, and track sequence significantly from last time."
+                if previous_songs else "Create a fresh, engaging playlist arrangement."
+            )
             
             # Use AI to curate a FRESH playlist with STRONG variety enforcement
             curation_result = await ai_client_instance.curate_this_is(
@@ -1684,23 +1697,31 @@ async def refresh_genre_mix_playlist(scheduled_playlist, db: DatabaseManager):
             scheduler_logger.warning(f"⚠️ Genre only has {len(all_tracks)} tracks, but user requested {original_length}. Using all available tracks.")
             original_length = len(all_tracks)
 
+        # Exclude previously used tracks at the data layer when library is large enough
+        previous_songs = original_playlist.get("songs", [])
+        previous_titles = set(previous_songs)
+        tracks_without_previous = [t for t in all_tracks if t.get("title", "") not in previous_titles]
+        if len(tracks_without_previous) >= original_length:
+            candidate_tracks = tracks_without_previous
+            scheduler_logger.info(f"🔄 Excluded {len(all_tracks) - len(tracks_without_previous)} previously-used tracks; {len(candidate_tracks)} remaining")
+        else:
+            candidate_tracks = all_tracks
+            scheduler_logger.info(f"🔄 Library too small to fully exclude previous tracks; using full set of {len(candidate_tracks)}")
+
         # Apply smart filtering to optimise LLM payload
         library_stats = await nav_client.get_library_stats()
         filtered_tracks, filter_metadata = filter_tracks_for_this_is_playlist(
-            source_tracks=all_tracks,
+            source_tracks=candidate_tracks,
             target_playlist_size=original_length,
             library_stats=library_stats
         )
         if filter_metadata['filtered']:
             scheduler_logger.info(f"🎯 Smart filtering applied: {filter_metadata['source_count']} → {filter_metadata['sent_count']} tracks")
 
-        # Variety enforcement: tell the AI what was in the previous playlist
-        previous_songs = original_playlist.get("songs", [])
         variety_instruction = (
-            f"REFRESH CONSTRAINT: This is a REFRESH, not a copy. Previous playlist had these tracks: "
-            f"{', '.join(previous_songs[:10])}. Create a completely different track selection and arrangement. "
-            f"Prioritize tracks NOT in the previous list. Tell a fresh musical story."
-        ) if previous_songs else "Create a fresh, engaging playlist arrangement."
+            "REFRESH: Keep the listening experience fresh — vary the mood, era mix, and track sequence significantly from last time."
+            if previous_songs else "Create a fresh, engaging playlist arrangement."
+        )
 
         curation_result = await ai_client_instance.curate_genre_mix(
             genre=genre,
@@ -1787,11 +1808,13 @@ async def refresh_multi_artist_radio_playlist(scheduled_playlist, db: DatabaseMa
             return
 
         original_length = original_playlist.get("playlist_length", 30)
-        library_stats = await nav_client.get_library_stats()
-        filtered_tracks, _ = filter_tracks_for_this_is_playlist(all_tracks, original_length, library_stats)
-
         previous_songs = original_playlist.get("songs", [])
-        variety_context = (f"REFRESH: Previous playlist had: {', '.join(previous_songs[:10])}. Create fresh selection." if previous_songs else None)
+        previous_titles = set(previous_songs)
+        tracks_without_previous = [t for t in all_tracks if t.get("title", "") not in previous_titles]
+        candidate_tracks = tracks_without_previous if len(tracks_without_previous) >= original_length else all_tracks
+        library_stats = await nav_client.get_library_stats()
+        filtered_tracks, _ = filter_tracks_for_this_is_playlist(candidate_tracks, original_length, library_stats)
+        variety_context = "REFRESH: Keep the selection fresh — vary mood, tempo, and track order significantly." if previous_songs else None
 
         curation_result = await ai_client_instance.curate_multi_artist_radio(
             artist_names=artist_names, tracks_json=filtered_tracks, num_tracks=original_length,
@@ -1836,11 +1859,13 @@ async def refresh_multi_genre_mix_playlist(scheduled_playlist, db: DatabaseManag
             return
 
         original_length = original_playlist.get("playlist_length", 30)
-        library_stats = await nav_client.get_library_stats()
-        filtered_tracks, _ = filter_tracks_for_this_is_playlist(all_tracks, original_length, library_stats)
-
         previous_songs = original_playlist.get("songs", [])
-        variety_context = (f"REFRESH: Previous had: {', '.join(previous_songs[:10])}. Create fresh selection." if previous_songs else None)
+        previous_titles = set(previous_songs)
+        tracks_without_previous = [t for t in all_tracks if t.get("title", "") not in previous_titles]
+        candidate_tracks = tracks_without_previous if len(tracks_without_previous) >= original_length else all_tracks
+        library_stats = await nav_client.get_library_stats()
+        filtered_tracks, _ = filter_tracks_for_this_is_playlist(candidate_tracks, original_length, library_stats)
+        variety_context = "REFRESH: Keep the selection fresh — vary mood, tempo, and track order significantly." if previous_songs else None
 
         curation_result = await ai_client_instance.curate_multi_genre_mix(
             genre_names=genres, tracks_json=filtered_tracks, num_tracks=original_length,
@@ -1888,11 +1913,16 @@ async def refresh_decade_discovery_playlist(scheduled_playlist, db: DatabaseMana
             return
 
         original_length = original_playlist.get("playlist_length", 30)
+        previous_songs = original_playlist.get("songs", [])
+        previous_titles = set(previous_songs)
+        tracks_without_previous = [t for t in all_tracks if t.get("title", "") not in previous_titles]
+        candidate_tracks = tracks_without_previous if len(tracks_without_previous) >= original_length else all_tracks
+
         if mode == "Discovery":
-            tracks_for_llm = all_tracks
+            tracks_for_llm = candidate_tracks
         else:
             library_stats = await nav_client.get_library_stats()
-            tracks_for_llm, _ = filter_tracks_for_this_is_playlist(all_tracks, original_length, library_stats)
+            tracks_for_llm, _ = filter_tracks_for_this_is_playlist(candidate_tracks, original_length, library_stats)
 
         curation_result = await ai_client_instance.curate_decade_discovery(
             decades=decades, mode=mode, tracks_json=tracks_for_llm, num_tracks=original_length, include_reasoning=True
@@ -1937,8 +1967,13 @@ async def refresh_sonic_journey_playlist(scheduled_playlist, db: DatabaseManager
         if not all_tracks:
             return
 
+        previous_songs = original_playlist.get("songs", [])
+        previous_titles = set(previous_songs)
+        tracks_without_previous = [t for t in all_tracks if t.get("title", "") not in previous_titles]
+        candidate_tracks = tracks_without_previous if len(tracks_without_previous) >= original_length else all_tracks
+
         library_stats = await nav_client.get_library_stats()
-        filtered_tracks, _ = filter_tracks_for_this_is_playlist(all_tracks, original_length * 4, library_stats)
+        filtered_tracks, _ = filter_tracks_for_this_is_playlist(candidate_tracks, original_length * 4, library_stats)
 
         curation_result = await ai_client_instance.curate_sonic_journey(
             start_artist=start_artist_name, end_artist=end_artist_name,
@@ -1984,11 +2019,16 @@ async def refresh_genre_archaeology_playlist(scheduled_playlist, db: DatabaseMan
             return
 
         original_length = original_playlist.get("playlist_length", 30)
+        previous_songs = original_playlist.get("songs", [])
+        previous_titles = set(previous_songs)
+        tracks_without_previous = [t for t in all_tracks if t.get("title", "") not in previous_titles]
+        candidate_tracks = tracks_without_previous if len(tracks_without_previous) >= original_length else all_tracks
+
         if dig_depth == "Deep":
-            tracks_for_llm = all_tracks
+            tracks_for_llm = candidate_tracks
         else:
             library_stats = await nav_client.get_library_stats()
-            tracks_for_llm, _ = filter_tracks_for_this_is_playlist(all_tracks, original_length, library_stats)
+            tracks_for_llm, _ = filter_tracks_for_this_is_playlist(candidate_tracks, original_length, library_stats)
 
         curation_result = await ai_client_instance.curate_genre_archaeology(
             genre=genre, dig_depth=dig_depth, tracks_json=tracks_for_llm,

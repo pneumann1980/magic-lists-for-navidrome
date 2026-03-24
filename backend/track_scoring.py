@@ -5,6 +5,7 @@ Optimizes payload size for LLM compatibility and token cost efficiency by intell
 scoring and filtering source tracks based on user listening behavior.
 """
 
+import random
 from datetime import datetime
 from typing import List, Dict, Tuple, Any
 
@@ -100,8 +101,13 @@ def score_tracks_by_user_engagement(tracks: List[Dict], library_stats: Dict) -> 
                 # Skip recency bonus if date parsing fails
                 pass
         
+        # Random jitter: ensures candidate pool varies between refreshes.
+        # Tracks with very high engagement scores still tend to be included,
+        # but marginal tracks rotate in/out, preventing stale repetition.
+        score += random.uniform(0, 45)
+
         scored_tracks.append((score, track))
-        
+
         # Update score statistics
         total_score += score
         engagement_stats['max_score'] = max(engagement_stats['max_score'], score)
