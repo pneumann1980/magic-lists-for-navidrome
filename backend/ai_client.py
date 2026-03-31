@@ -1,9 +1,79 @@
+import heapq
+import math
 import httpx
 import os
 import json
+from collections import defaultdict, deque
 from typing import List, Dict, Any, Union, Tuple, Optional
 from .recipe_manager import recipe_manager
 from .services.ai_providers import get_ai_provider
+
+
+def _distribute_by_artist(
+    track_ids: List[str],
+    id_to_artist: Dict[str, str],
+    num_tracks: int,
+) -> List[str]:
+    """
+    Reorder track_ids so that:
+      1. No two consecutive tracks share the same artist.
+      2. Each artist appears at most max_per_artist times, where
+         max_per_artist = max(2, min(fair_share, num_tracks // 4)).
+         The 25 % cap (num_tracks // 4) prevents one dominant artist from
+         taking over the playlist; the fair-share floor ensures smaller
+         rosters (e.g. 2-artist blends) still get equal representation.
+
+    Uses a greedy max-heap so the artist with the most remaining tracks is
+    always preferred, avoiding early exhaustion of smaller rosters.
+    """
+    artist_queues: Dict[str, deque] = defaultdict(deque)
+    for tid in track_ids:
+        artist = id_to_artist.get(tid, "Unknown")
+        artist_queues[artist].append(tid)
+
+    n_artists = len(artist_queues)
+    if n_artists <= 1:
+        return list(track_ids[:num_tracks])
+
+    fair_share = math.ceil(num_tracks / n_artists)
+    max_per_artist = max(2, min(fair_share, max(2, num_tracks // 4)))
+
+    for artist in artist_queues:
+        q = artist_queues[artist]
+        while len(q) > max_per_artist:
+            q.pop()
+
+    # Max-heap: (-remaining, tiebreak, artist)
+    tb = 0
+    heap: List = []
+    for artist, q in artist_queues.items():
+        if q:
+            heapq.heappush(heap, (-len(q), tb, artist))
+            tb += 1
+
+    result: List[str] = []
+    prev_artist: str = ""
+
+    while heap and len(result) < num_tracks:
+        neg, t, artist = heapq.heappop(heap)
+
+        if artist == prev_artist and heap:
+            # Can't use this artist back-to-back — try the next best
+            neg2, t2, artist2 = heapq.heappop(heap)
+            result.append(artist_queues[artist2].popleft())
+            prev_artist = artist2
+            if artist_queues[artist2]:
+                heapq.heappush(heap, (-len(artist_queues[artist2]), tb, artist2))
+                tb += 1
+            heapq.heappush(heap, (neg, t, artist))  # put original back
+        else:
+            result.append(artist_queues[artist].popleft())
+            prev_artist = artist
+            if artist_queues[artist]:
+                heapq.heappush(heap, (-len(artist_queues[artist]), tb, artist))
+                tb += 1
+
+    return result
 
 class AIClient:
     """Client for AI-powered track curation using configurable providers"""
@@ -919,17 +989,12 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
                     # Map valid indices to actual track IDs
                     valid_indices = [idx for idx in track_ids if 0 <= idx < len(track_id_map)]
                     mapped_track_ids = [track_id_map[idx] for idx in valid_indices]
-                    # Mapped indices to track IDs
 
-                    # Final selection (limit to requested count)
-                    final_selection = mapped_track_ids[:num_tracks]
+                    # Distribute by artist: cap per-artist count and interleave
+                    # so no two consecutive tracks share the same artist.
+                    id_to_artist = {t["id"]: t.get("artist", "Unknown") for t in shuffled_tracks}
+                    mapped_track_ids = _distribute_by_artist(mapped_track_ids, id_to_artist, num_tracks)
 
-                    # AI curation successful for Genre Mix (logging moved to scheduler_logger)
-                    if reasoning:
-                        # AI reasoning available (logged in main.py scheduler_logger)
-                        pass
-
-                    # Final selection (limit to requested count)
                     final_selection = mapped_track_ids[:num_tracks]
 
                     if include_reasoning:
@@ -1105,6 +1170,11 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
 
                 valid_indices = [idx for idx in track_ids if 0 <= idx < len(track_id_map)]
                 mapped_ids = [track_id_map[idx] for idx in valid_indices]
+
+                # Distribute by artist: cap per-artist count and interleave
+                id_to_artist = {t["id"]: t.get("artist", "Unknown") for t in shuffled_tracks}
+                mapped_ids = _distribute_by_artist(mapped_ids, id_to_artist, num_tracks)
+
                 final_selection = mapped_ids[:num_tracks]
 
                 print(f"✅ {recipe_key}: {len(final_selection)} tracks curated")
