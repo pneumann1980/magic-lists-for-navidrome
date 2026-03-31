@@ -35,8 +35,12 @@ def _distribute_by_artist(
     if n_artists <= 1:
         return list(track_ids[:num_tracks])
 
-    fair_share = math.ceil(num_tracks / n_artists)
-    max_per_artist = max(2, min(fair_share, max(2, num_tracks // 4)))
+    # Base the cap on the ACTUAL number of tracks returned by the AI, not the
+    # requested count.  Using num_tracks (e.g. 25) when only 10 tracks were
+    # returned inflates fair_share and lets one artist dominate.
+    actual_count = len(track_ids)
+    fair_share = math.ceil(actual_count / n_artists)
+    max_per_artist = max(2, min(fair_share, max(2, actual_count // 4)))
 
     for artist in artist_queues:
         q = artist_queues[artist]
