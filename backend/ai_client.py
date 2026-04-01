@@ -11,7 +11,7 @@ from .services.ai_providers import get_ai_provider
 
 import re as _re
 
-def _primary_artist(artist: str) -> str:
+def _primary_artist(artist) -> str:
     """
     Normalise a collaboration string to the primary artist so that
     'Queen' and 'Queen & David Bowie' are treated as the same artist.
@@ -24,6 +24,9 @@ def _primary_artist(artist: str) -> str:
          'Simon & Garfunkel'   → 'Simon & Garfunkel'  (no space after &)
          'Earth, Wind & Fire'  → 'Earth, Wind & Fire'  (no space after &)
     """
+    if not artist:
+        return "Unknown"
+    artist = str(artist)
     # Strip featuring
     artist = _re.split(
         r'\s+(?:feat\.?|ft\.?|featuring|with)\s+',
@@ -35,7 +38,7 @@ def _primary_artist(artist: str) -> str:
     parts = _re.split(r'\s+&\s+', artist, maxsplit=1)
     if len(parts) == 2 and ' ' in parts[1]:
         artist = parts[0].strip()
-    return artist
+    return artist or "Unknown"
 
 
 def _distribute_by_artist(
@@ -53,12 +56,13 @@ def _distribute_by_artist(
     'Queen' and 'Queen & David Bowie' count as the same artist.
 
     When only one artist remains and a consecutive pair would be forced,
-    the loop stops rather than appending consecutive tracks — the
-    playlist may be 1–2 tracks short but never has same-artist clusters.
+    that track is still appended (accepting a single consecutive pair is
+    always better than leaving a gap that gets filled with unsorted data).
     """
     artist_queues: Dict[str, deque] = defaultdict(deque)
     for tid in track_ids:
-        primary = _primary_artist(id_to_artist.get(tid, "Unknown"))
+        raw = id_to_artist.get(tid) or "Unknown"
+        primary = _primary_artist(raw)
         artist_queues[primary].append(tid)
 
     n_artists = len(artist_queues)
@@ -68,7 +72,7 @@ def _distribute_by_artist(
     fair_share = math.ceil(num_tracks / n_artists)
     max_per_artist = max(2, fair_share)
 
-    for artist in artist_queues:
+    for artist in list(artist_queues):
         q = artist_queues[artist]
         while len(q) > max_per_artist:
             q.pop()
@@ -98,8 +102,12 @@ def _distribute_by_artist(
                     tb += 1
                 heapq.heappush(heap, (neg, t, artist))
             else:
-                # No alternative left — stop rather than force consecutive
-                break
+                # No alternative — accept one consecutive rather than leaving a gap
+                result.append(artist_queues[artist].popleft())
+                prev_artist = artist
+                if artist_queues[artist]:
+                    heapq.heappush(heap, (-len(artist_queues[artist]), tb, artist))
+                    tb += 1
         else:
             result.append(artist_queues[artist].popleft())
             prev_artist = artist
@@ -797,19 +805,10 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
 
         if not self.api_key and self.provider.provider_type == "openrouter":
             print(f"❌ No AI API key configured, using fallback curation for {genre}")
-            # Fallback: return first num_tracks by play count
-            sorted_tracks = sorted(
-                tracks_json,
-                key=lambda x: x.get("play_count", 0),
-                reverse=True
+            return self._fallback_genre_mix_selection(
+                tracks_json, num_tracks, include_reasoning,
+                "No AI API key configured."
             )
-            track_ids = [track["id"] for track in sorted_tracks[:num_tracks]]
-
-            if include_reasoning:
-                fallback_reasoning = f"Fallback curation: Selected {len(track_ids)} tracks sorted by play count (highest first). No AI API key configured."
-                return track_ids, fallback_reasoning
-            else:
-                return track_ids
 
         try:
             # Using AI to curate playlist (logging moved to scheduler_logger)
@@ -1245,9 +1244,11 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
         """Curate a Multi-Artist Radio Blend playlist"""
         if not self.api_key and self.provider.provider_type == "openrouter":
             sorted_tracks = sorted(tracks_json, key=lambda x: x.get("play_count", 0), reverse=True)
-            track_ids = [t["id"] for t in sorted_tracks[:num_tracks]]
-            reasoning = f"Fallback: top {len(track_ids)} tracks by play count. No AI key configured."
-            return (track_ids, reasoning) if include_reasoning else track_ids
+            pool = sorted_tracks[:num_tracks * 3]
+            id_to_artist = {t["id"]: t.get("artist") or "Unknown" for t in pool}
+            distributed = _distribute_by_artist([t["id"] for t in pool], id_to_artist, num_tracks)
+            reasoning = f"Fallback curation: Selected top {len(distributed)} tracks sorted by play count (highest first). No AI API key configured."
+            return (distributed, reasoning) if include_reasoning else distributed
 
         recipe = recipe_manager.get_recipe("multi_artist_radio")
         artist_names_str = ", ".join(artist_names)
@@ -1263,8 +1264,10 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
 
         def fallback(tracks, n, inc_r):
             s = sorted(tracks, key=lambda x: x.get("play_count", 0), reverse=True)
-            ids = [t["id"] for t in s[:n]]
-            r = f"Fallback: top {len(ids)} tracks by play count."
+            pool = s[:n * 3]
+            id_to_art = {t["id"]: t.get("artist") or "Unknown" for t in pool}
+            ids = _distribute_by_artist([t["id"] for t in pool], id_to_art, n)
+            r = f"Fallback curation: Selected top {len(ids)} tracks sorted by play count (highest first)."
             return (ids, r) if inc_r else ids
 
         return await self._curate_with_recipe("multi_artist_radio", model_instructions, user_content, tracks_json, num_tracks, include_reasoning, fallback)
@@ -1280,9 +1283,11 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
         """Curate a Multi-Genre Mix playlist"""
         if not self.api_key and self.provider.provider_type == "openrouter":
             sorted_tracks = sorted(tracks_json, key=lambda x: x.get("play_count", 0), reverse=True)
-            track_ids = [t["id"] for t in sorted_tracks[:num_tracks]]
-            reasoning = f"Fallback: top {len(track_ids)} tracks by play count. No AI key configured."
-            return (track_ids, reasoning) if include_reasoning else track_ids
+            pool = sorted_tracks[:num_tracks * 3]
+            id_to_artist = {t["id"]: t.get("artist") or "Unknown" for t in pool}
+            distributed = _distribute_by_artist([t["id"] for t in pool], id_to_artist, num_tracks)
+            reasoning = f"Fallback curation: Selected top {len(distributed)} tracks sorted by play count (highest first). No AI API key configured."
+            return (distributed, reasoning) if include_reasoning else distributed
 
         recipe = recipe_manager.get_recipe("multi_genre_mix")
         genre_names_str = ", ".join(genre_names)
@@ -1298,8 +1303,10 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
 
         def fallback(tracks, n, inc_r):
             s = sorted(tracks, key=lambda x: x.get("play_count", 0), reverse=True)
-            ids = [t["id"] for t in s[:n]]
-            r = f"Fallback: top {len(ids)} tracks by play count."
+            pool = s[:n * 3]
+            id_to_art = {t["id"]: t.get("artist") or "Unknown" for t in pool}
+            ids = _distribute_by_artist([t["id"] for t in pool], id_to_art, n)
+            r = f"Fallback curation: Selected top {len(ids)} tracks sorted by play count (highest first)."
             return (ids, r) if inc_r else ids
 
         return await self._curate_with_recipe("multi_genre_mix", model_instructions, user_content, tracks_json, num_tracks, include_reasoning, fallback)
@@ -1315,11 +1322,13 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
     ) -> Union[List[str], Tuple[List[str], str]]:
         """Curate a Decade & Discovery playlist"""
         if not self.api_key and self.provider.provider_type == "openrouter":
-            reverse = (mode != "Discovery")
-            sorted_tracks = sorted(tracks_json, key=lambda x: x.get("play_count", 0), reverse=reverse)
-            track_ids = [t["id"] for t in sorted_tracks[:num_tracks]]
-            reasoning = f"Fallback: top {len(track_ids)} tracks. No AI key configured."
-            return (track_ids, reasoning) if include_reasoning else track_ids
+            rev = (mode != "Discovery")
+            sorted_tracks = sorted(tracks_json, key=lambda x: x.get("play_count", 0), reverse=rev)
+            pool = sorted_tracks[:num_tracks * 3]
+            id_to_artist = {t["id"]: t.get("artist") or "Unknown" for t in pool}
+            distributed = _distribute_by_artist([t["id"] for t in pool], id_to_artist, num_tracks)
+            reasoning = f"Fallback curation: Selected top {len(distributed)} tracks. No AI API key configured."
+            return (distributed, reasoning) if include_reasoning else distributed
 
         recipe = recipe_manager.get_recipe("decade_discovery")
         decades_str = ", ".join(decades)
@@ -1335,10 +1344,12 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
         user_content = f'Select {num_tracks} tracks for a {decades_str} decade playlist in {mode} mode.\n\nTracks: __INDEXED_TRACKS__\n\nReturn JSON: {{"track_ids": [indices], "reasoning": "summary"}}'
 
         def fallback(tracks, n, inc_r):
-            reverse = (mode != "Discovery")
-            s = sorted(tracks, key=lambda x: x.get("play_count", 0), reverse=reverse)
-            ids = [t["id"] for t in s[:n]]
-            r = f"Fallback: tracks sorted by play count ({'desc' if reverse else 'asc'})."
+            rev = (mode != "Discovery")
+            s = sorted(tracks, key=lambda x: x.get("play_count", 0), reverse=rev)
+            pool = s[:n * 3]
+            id_to_art = {t["id"]: t.get("artist") or "Unknown" for t in pool}
+            ids = _distribute_by_artist([t["id"] for t in pool], id_to_art, n)
+            r = f"Fallback curation: Selected top {len(ids)} tracks sorted by play count (highest first)."
             return (ids, r) if inc_r else ids
 
         return await self._curate_with_recipe("decade_discovery", model_instructions, user_content, tracks_json, num_tracks, include_reasoning, fallback)
@@ -1355,9 +1366,11 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
         """Curate a Sonic Journey playlist from start_artist to end_artist"""
         if not self.api_key and self.provider.provider_type == "openrouter":
             sorted_tracks = sorted(tracks_json, key=lambda x: x.get("play_count", 0), reverse=True)
-            track_ids = [t["id"] for t in sorted_tracks[:num_tracks]]
-            reasoning = f"Fallback: top {len(track_ids)} tracks. No AI key configured."
-            return (track_ids, reasoning) if include_reasoning else track_ids
+            pool = sorted_tracks[:num_tracks * 3]
+            id_to_artist = {t["id"]: t.get("artist") or "Unknown" for t in pool}
+            distributed = _distribute_by_artist([t["id"] for t in pool], id_to_artist, num_tracks)
+            reasoning = f"Fallback curation: Selected top {len(distributed)} tracks. No AI API key configured."
+            return (distributed, reasoning) if include_reasoning else distributed
 
         recipe = recipe_manager.get_recipe("sonic_journey")
         model_instructions = (
@@ -1373,8 +1386,10 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
 
         def fallback(tracks, n, inc_r):
             s = sorted(tracks, key=lambda x: x.get("play_count", 0), reverse=True)
-            ids = [t["id"] for t in s[:n]]
-            r = f"Fallback: top {len(ids)} tracks by play count."
+            pool = s[:n * 3]
+            id_to_art = {t["id"]: t.get("artist") or "Unknown" for t in pool}
+            ids = _distribute_by_artist([t["id"] for t in pool], id_to_art, n)
+            r = f"Fallback curation: Selected top {len(ids)} tracks sorted by play count (highest first)."
             return (ids, r) if inc_r else ids
 
         return await self._curate_with_recipe("sonic_journey", model_instructions, user_content, tracks_json, num_tracks, include_reasoning, fallback)
@@ -1390,11 +1405,15 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
     ) -> Union[List[str], Tuple[List[str], str]]:
         """Curate a Genre Archaeology playlist"""
         if not self.api_key and self.provider.provider_type == "openrouter":
-            reverse = (dig_depth != "Deep")
-            sorted_tracks = sorted(tracks_json, key=lambda x: (x.get("year", 0) if dig_depth == "Deep" else x.get("play_count", 0)), reverse=reverse)
-            track_ids = [t["id"] for t in sorted_tracks[:num_tracks]]
-            reasoning = f"Fallback: tracks sorted for {dig_depth} dig. No AI key configured."
-            return (track_ids, reasoning) if include_reasoning else track_ids
+            if dig_depth == "Deep":
+                sorted_tracks = sorted(tracks_json, key=lambda x: x.get("year", 0))
+            else:
+                sorted_tracks = sorted(tracks_json, key=lambda x: x.get("play_count", 0), reverse=True)
+            pool = sorted_tracks[:num_tracks * 3]
+            id_to_artist = {t["id"]: t.get("artist") or "Unknown" for t in pool}
+            distributed = _distribute_by_artist([t["id"] for t in pool], id_to_artist, num_tracks)
+            reasoning = f"Fallback curation: Selected top {len(distributed)} tracks. No AI API key configured."
+            return (distributed, reasoning) if include_reasoning else distributed
 
         recipe = recipe_manager.get_recipe("genre_archaeology")
         model_instructions = (
@@ -1413,8 +1432,10 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
                 s = sorted(tracks, key=lambda x: x.get("year", 0))
             else:
                 s = sorted(tracks, key=lambda x: x.get("play_count", 0), reverse=True)
-            ids = [t["id"] for t in s[:n]]
-            r = f"Fallback: tracks sorted for {dig_depth} dig."
+            pool = s[:n * 3]
+            id_to_art = {t["id"]: t.get("artist") or "Unknown" for t in pool}
+            ids = _distribute_by_artist([t["id"] for t in pool], id_to_art, n)
+            r = f"Fallback curation: Selected top {len(ids)} tracks sorted by play count (highest first)."
             return (ids, r) if inc_r else ids
 
         return await self._curate_with_recipe("genre_archaeology", model_instructions, user_content, tracks_json, num_tracks, include_reasoning, fallback)

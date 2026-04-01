@@ -43,7 +43,7 @@ logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('httpcore').setLevel(logging.WARNING)
 
 from .navidrome_client import NavidromeClient
-from .ai_client import AIClient
+from .ai_client import AIClient, _distribute_by_artist
 from .database import DatabaseManager, get_db
 from .schemas import CreatePlaylistRequest, CreateGenrePlaylistRequest, Playlist, RediscoverWeeklyResponse, RediscoverWeeklyV2Response, CreateRediscoverPlaylistRequest, PlaylistWithScheduleInfo, UpdatePlaylistSettingsRequest, CreateMultiArtistRadioRequest, CreateMultiGenreMixRequest, CreateDecadeDiscoveryRequest, CreateSonicJourneyRequest, CreateGenreArchaeologyRequest
 from .recipe_manager import recipe_manager
@@ -1331,6 +1331,15 @@ def calculate_next_refresh(frequency: str) -> datetime:
     else:
         return now  # Fallback
 
+
+def _is_transient_fallback(reasoning: str) -> bool:
+    """Return True when AI curation fell back due to a transient error (not a missing API key)."""
+    return (
+        reasoning.startswith("Fallback curation:")
+        and "No AI API key configured" not in reasoning
+    )
+
+
 def schedule_playlist_refresh():
     """Schedule the playlist refresh job to run every 12 hours"""
     if not scheduler.get_job('playlist_refresh'):
@@ -1487,6 +1496,16 @@ async def refresh_rediscover_playlist(scheduled_playlist, db: DatabaseManager):
                 ai_reasoning = first_track.get("ai_reasoning", "")
                 ai_curated = first_track.get("ai_curated", False)
             
+            # Skip update if AI had a transient error (keep existing playlist, retry in 1 h)
+            if _is_transient_fallback(ai_reasoning):
+                retry_at = datetime.now() + timedelta(hours=1)
+                await db.update_scheduled_playlist_next_refresh(scheduled_playlist.id, retry_at)
+                scheduler_logger.warning(
+                    f"⚠️ AI error on Re-Discover refresh — keeping existing playlist unchanged. "
+                    f"Retry scheduled for {retry_at.strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+                return
+
             # Log the AI reasoning for scheduled refresh (truncated)
             if ai_reasoning and ai_curated:
                 reasoning_preview = ai_reasoning[:200] + "..." if len(ai_reasoning) > 200 else ai_reasoning
@@ -1609,7 +1628,17 @@ async def refresh_this_is_playlist(scheduled_playlist, db: DatabaseManager):
             else:
                 curated_track_ids = curation_result
                 reasoning = ""
-            
+
+            # Skip update if AI had a transient error (keep existing playlist, retry in 1 h)
+            if _is_transient_fallback(reasoning):
+                retry_at = datetime.now() + timedelta(hours=1)
+                await db.update_scheduled_playlist_next_refresh(scheduled_playlist.id, retry_at)
+                scheduler_logger.warning(
+                    f"⚠️ AI error on This Is refresh — keeping existing playlist unchanged. "
+                    f"Retry scheduled for {retry_at.strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+                return
+
             if curated_track_ids:
                 # VALIDATE: Ensure we got the right number of tracks
                 if len(curated_track_ids) < original_length and len(tracks) >= original_length:
@@ -1737,13 +1766,26 @@ async def refresh_genre_mix_playlist(scheduled_playlist, db: DatabaseManager):
             curated_track_ids = curation_result
             reasoning = ""
 
+        # Skip update if AI had a transient error (keep existing playlist, retry in 1 h)
+        if _is_transient_fallback(reasoning):
+            retry_at = datetime.now() + timedelta(hours=1)
+            await db.update_scheduled_playlist_next_refresh(scheduled_playlist.id, retry_at)
+            scheduler_logger.warning(
+                f"⚠️ AI error on Genre Mix refresh — keeping existing playlist unchanged. "
+                f"Retry scheduled for {retry_at.strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+            return
+
         if curated_track_ids:
-            # Fill any gap if AI returned fewer tracks than requested
+            # Fill any gap if AI returned fewer tracks than requested, then re-distribute
             if len(curated_track_ids) < original_length and len(all_tracks) >= original_length:
                 scheduler_logger.warning(f"⚠️ AI returned only {len(curated_track_ids)} tracks but user requested {original_length}. Filling gap.")
                 used_ids = set(curated_track_ids)
                 remaining = [t for t in all_tracks if t["id"] not in used_ids]
                 curated_track_ids.extend([t["id"] for t in remaining[:original_length - len(curated_track_ids)]])
+                # Re-distribute the combined list so gap-filled tracks are also interleaved
+                id_to_artist_map = {t["id"]: t.get("artist") or "Unknown" for t in all_tracks}
+                curated_track_ids = _distribute_by_artist(curated_track_ids, id_to_artist_map, original_length)
 
             scheduler_logger.info(f"🎯 Final track count: {len(curated_track_ids)} (requested: {original_length})")
 
@@ -1822,6 +1864,16 @@ async def refresh_multi_artist_radio_playlist(scheduled_playlist, db: DatabaseMa
         )
         curated_track_ids, reasoning = curation_result if isinstance(curation_result, tuple) else (curation_result, "")
 
+        # Skip update if AI had a transient error (keep existing playlist, retry in 1 h)
+        if _is_transient_fallback(reasoning):
+            retry_at = datetime.now() + timedelta(hours=1)
+            await db.update_scheduled_playlist_next_refresh(scheduled_playlist.id, retry_at)
+            scheduler_logger.warning(
+                f"⚠️ AI error on Multi-Artist Radio refresh — keeping existing playlist unchanged. "
+                f"Retry scheduled for {retry_at.strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+            return
+
         if curated_track_ids:
             await nav_client.update_playlist(playlist_id=scheduled_playlist.navidrome_playlist_id, track_ids=curated_track_ids, comment=reasoning or None)
             track_id_to_title = {t["id"]: t["title"] for t in all_tracks}
@@ -1872,6 +1924,15 @@ async def refresh_multi_genre_mix_playlist(scheduled_playlist, db: DatabaseManag
             include_reasoning=True, variety_context=variety_context
         )
         curated_track_ids, reasoning = curation_result if isinstance(curation_result, tuple) else (curation_result, "")
+
+        if _is_transient_fallback(reasoning):
+            retry_at = datetime.now() + timedelta(hours=1)
+            await db.update_scheduled_playlist_next_refresh(scheduled_playlist.id, retry_at)
+            scheduler_logger.warning(
+                f"⚠️ AI error on Multi-Genre Mix refresh — keeping existing playlist unchanged. "
+                f"Retry scheduled for {retry_at.strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+            return
 
         if curated_track_ids:
             await nav_client.update_playlist(playlist_id=scheduled_playlist.navidrome_playlist_id, track_ids=curated_track_ids, comment=reasoning or None)
@@ -1929,6 +1990,15 @@ async def refresh_decade_discovery_playlist(scheduled_playlist, db: DatabaseMana
         )
         curated_track_ids, reasoning = curation_result if isinstance(curation_result, tuple) else (curation_result, "")
 
+        if _is_transient_fallback(reasoning):
+            retry_at = datetime.now() + timedelta(hours=1)
+            await db.update_scheduled_playlist_next_refresh(scheduled_playlist.id, retry_at)
+            scheduler_logger.warning(
+                f"⚠️ AI error on Decade & Discovery refresh — keeping existing playlist unchanged. "
+                f"Retry scheduled for {retry_at.strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+            return
+
         if curated_track_ids:
             await nav_client.update_playlist(playlist_id=scheduled_playlist.navidrome_playlist_id, track_ids=curated_track_ids, comment=reasoning or None)
             track_id_to_title = {t["id"]: t["title"] for t in all_tracks}
@@ -1980,6 +2050,15 @@ async def refresh_sonic_journey_playlist(scheduled_playlist, db: DatabaseManager
             tracks_json=filtered_tracks, num_tracks=original_length, include_reasoning=True
         )
         curated_track_ids, reasoning = curation_result if isinstance(curation_result, tuple) else (curation_result, "")
+
+        if _is_transient_fallback(reasoning):
+            retry_at = datetime.now() + timedelta(hours=1)
+            await db.update_scheduled_playlist_next_refresh(scheduled_playlist.id, retry_at)
+            scheduler_logger.warning(
+                f"⚠️ AI error on Sonic Journey refresh — keeping existing playlist unchanged. "
+                f"Retry scheduled for {retry_at.strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+            return
 
         if curated_track_ids:
             await nav_client.update_playlist(playlist_id=scheduled_playlist.navidrome_playlist_id, track_ids=curated_track_ids, comment=reasoning or None)
@@ -2035,6 +2114,15 @@ async def refresh_genre_archaeology_playlist(scheduled_playlist, db: DatabaseMan
             num_tracks=original_length, include_reasoning=True
         )
         curated_track_ids, reasoning = curation_result if isinstance(curation_result, tuple) else (curation_result, "")
+
+        if _is_transient_fallback(reasoning):
+            retry_at = datetime.now() + timedelta(hours=1)
+            await db.update_scheduled_playlist_next_refresh(scheduled_playlist.id, retry_at)
+            scheduler_logger.warning(
+                f"⚠️ AI error on Genre Archaeology refresh — keeping existing playlist unchanged. "
+                f"Retry scheduled for {retry_at.strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+            return
 
         if curated_track_ids:
             await nav_client.update_playlist(playlist_id=scheduled_playlist.navidrome_playlist_id, track_ids=curated_track_ids, comment=reasoning or None)
