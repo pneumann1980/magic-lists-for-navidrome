@@ -880,26 +880,28 @@ class NavidromeClient:
                 
                 print(f"🎯 Successfully added all {len(track_ids)} tracks in single API call")
             
-            # Add comment via updatePlaylist if provided (createPlaylist doesn't support comments)
-            if comment:
-                print(f"💬 Adding comment to playlist via updatePlaylist...")
-                comment_params = self._get_subsonic_params()
-                comment_params["playlistId"] = playlist_id
-                comment_params["comment"] = comment
-                
-                comment_response = await self.client.get(
+            # Set public=true and optionally add comment via updatePlaylist
+            # (createPlaylist doesn't support these fields)
+            if comment or True:  # always run to ensure public=true
+                update_meta_params = self._get_subsonic_params()
+                update_meta_params["playlistId"] = playlist_id
+                update_meta_params["public"] = "true"
+                if comment:
+                    update_meta_params["comment"] = comment
+
+                meta_response = await self.client.get(
                     f"{self.base_url}/rest/updatePlaylist.view",
-                    params=comment_params
+                    params=update_meta_params
                 )
-                comment_response.raise_for_status()
-                
-                comment_data = comment_response.json()
-                comment_subsonic = comment_data.get("subsonic-response", {})
-                if comment_subsonic.get("status") != "ok":
-                    error = comment_subsonic.get("error", {})
-                    print(f"⚠️ Warning: Failed to add comment to playlist: {error.get('message', 'Unknown error')}")
+                meta_response.raise_for_status()
+
+                meta_data = meta_response.json()
+                meta_subsonic = meta_data.get("subsonic-response", {})
+                if meta_subsonic.get("status") != "ok":
+                    error = meta_subsonic.get("error", {})
+                    print(f"⚠️ Warning: Failed to set playlist public/comment: {error.get('message', 'Unknown error')}")
                 else:
-                    print(f"✅ Successfully added comment to playlist")
+                    print(f"✅ Playlist set to public{' with comment' if comment else ''}")
                 
             return playlist_id
                 
