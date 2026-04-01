@@ -35,12 +35,17 @@ def _distribute_by_artist(
     if n_artists <= 1:
         return list(track_ids[:num_tracks])
 
-    # Base the cap on the ACTUAL number of tracks returned by the AI, not the
-    # requested count.  Using num_tracks (e.g. 25) when only 10 tracks were
-    # returned inflates fair_share and lets one artist dominate.
-    actual_count = len(track_ids)
-    fair_share = math.ceil(actual_count / n_artists)
-    max_per_artist = max(2, min(fair_share, max(2, actual_count // 4)))
+    # Cap per artist based on num_tracks (the DESIRED output size), not on
+    # len(track_ids) (the pool size).  The pool can be 3× larger than
+    # num_tracks (e.g. fallback takes top-75 for a 25-track playlist), which
+    # would inflate fair_share and allow 8 tracks for one artist — exactly
+    # the clustering shown in testing.
+    #
+    # fair_share = equal split of the desired final size across all artists.
+    # No hard-percentage cap: for a 2-artist blend fair_share is ~50%, which
+    # is correct; for 10 artists in a genre mix it's ~10%, also correct.
+    fair_share = math.ceil(num_tracks / n_artists)
+    max_per_artist = max(2, fair_share)
 
     for artist in artist_queues:
         q = artist_queues[artist]
