@@ -413,9 +413,9 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
                 elif isinstance(response_data, list) and all(isinstance(tid, str) for tid in response_data):
                     valid_ids = {track["id"] for track in tracks_json}
                     filtered_ids = [tid for tid in response_data if tid in valid_ids]
+                    id_to_artist = {t["id"]: t.get("artist", "Unknown") for t in shuffled_tracks}
+                    filtered_ids = _distribute_by_artist(filtered_ids, id_to_artist, num_tracks)
                     final_selection = filtered_ids[:num_tracks]
-
-                    # AI curation successful for Genre Mix (logging moved to scheduler_logger)
 
                     if include_reasoning:
                         return final_selection, ""  # No reasoning available
@@ -1010,9 +1010,9 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
                 elif isinstance(response_data, list) and all(isinstance(tid, str) for tid in response_data):
                     valid_ids = {track["id"] for track in tracks_json}
                     filtered_ids = [tid for tid in response_data if tid in valid_ids]
+                    id_to_artist = {t["id"]: t.get("artist", "Unknown") for t in shuffled_tracks}
+                    filtered_ids = _distribute_by_artist(filtered_ids, id_to_artist, num_tracks)
                     final_selection = filtered_ids[:num_tracks]
-
-                    # AI curation successful for Genre Mix (logging moved to scheduler_logger)
 
                     if include_reasoning:
                         return final_selection, ""  # No reasoning available
@@ -1070,7 +1070,12 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
             key=lambda x: x.get("play_count", 0),
             reverse=True
         )
-        track_ids = [track["id"] for track in sorted_tracks[:num_tracks]]
+        # Take a larger pool first so distribution has variety to work with
+        pool = sorted_tracks[:num_tracks * 3]
+        id_to_artist = {t["id"]: t.get("artist", "Unknown") for t in pool}
+        pool_ids = [t["id"] for t in pool]
+        distributed = _distribute_by_artist(pool_ids, id_to_artist, num_tracks)
+        track_ids = distributed[:num_tracks]
 
         if include_reasoning:
             reasoning = f"Fallback curation: Selected top {len(track_ids)} tracks sorted by play count (highest first). {error_reason}"
