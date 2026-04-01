@@ -9,6 +9,35 @@ from .recipe_manager import recipe_manager
 from .services.ai_providers import get_ai_provider
 
 
+import re as _re
+
+def _primary_artist(artist: str) -> str:
+    """
+    Normalise a collaboration string to the primary artist so that
+    'Queen' and 'Queen & David Bowie' are treated as the same artist.
+
+    Rules applied in order:
+      1. Strip featured artist:  'Linkin Park feat. Jay-Z' → 'Linkin Park'
+      2. Strip guest collab where the guest looks like a person name
+         (part after ' & ' contains a space):
+         'Queen & David Bowie' → 'Queen'
+         'Simon & Garfunkel'   → 'Simon & Garfunkel'  (no space after &)
+         'Earth, Wind & Fire'  → 'Earth, Wind & Fire'  (no space after &)
+    """
+    # Strip featuring
+    artist = _re.split(
+        r'\s+(?:feat\.?|ft\.?|featuring|with)\s+',
+        artist,
+        maxsplit=1,
+        flags=_re.IGNORECASE,
+    )[0].strip()
+    # Strip collaboration guest that looks like a person name
+    parts = _re.split(r'\s+&\s+', artist, maxsplit=1)
+    if len(parts) == 2 and ' ' in parts[1]:
+        artist = parts[0].strip()
+    return artist
+
+
 def _distribute_by_artist(
     track_ids: List[str],
     id_to_artist: Dict[str, str],
@@ -16,34 +45,26 @@ def _distribute_by_artist(
 ) -> List[str]:
     """
     Reorder track_ids so that:
-      1. No two consecutive tracks share the same artist.
-      2. Each artist appears at most max_per_artist times, where
-         max_per_artist = max(2, min(fair_share, num_tracks // 4)).
-         The 25 % cap (num_tracks // 4) prevents one dominant artist from
-         taking over the playlist; the fair-share floor ensures smaller
-         rosters (e.g. 2-artist blends) still get equal representation.
+      1. No two consecutive tracks share the same primary artist.
+      2. Each primary artist appears at most fair_share times, where
+         fair_share = ceil(num_tracks / n_artists).
 
-    Uses a greedy max-heap so the artist with the most remaining tracks is
-    always preferred, avoiding early exhaustion of smaller rosters.
+    Artist strings are normalised via _primary_artist() so that e.g.
+    'Queen' and 'Queen & David Bowie' count as the same artist.
+
+    When only one artist remains and a consecutive pair would be forced,
+    the loop stops rather than appending consecutive tracks — the
+    playlist may be 1–2 tracks short but never has same-artist clusters.
     """
     artist_queues: Dict[str, deque] = defaultdict(deque)
     for tid in track_ids:
-        artist = id_to_artist.get(tid, "Unknown")
-        artist_queues[artist].append(tid)
+        primary = _primary_artist(id_to_artist.get(tid, "Unknown"))
+        artist_queues[primary].append(tid)
 
     n_artists = len(artist_queues)
     if n_artists <= 1:
         return list(track_ids[:num_tracks])
 
-    # Cap per artist based on num_tracks (the DESIRED output size), not on
-    # len(track_ids) (the pool size).  The pool can be 3× larger than
-    # num_tracks (e.g. fallback takes top-75 for a 25-track playlist), which
-    # would inflate fair_share and allow 8 tracks for one artist — exactly
-    # the clustering shown in testing.
-    #
-    # fair_share = equal split of the desired final size across all artists.
-    # No hard-percentage cap: for a 2-artist blend fair_share is ~50%, which
-    # is correct; for 10 artists in a genre mix it's ~10%, also correct.
     fair_share = math.ceil(num_tracks / n_artists)
     max_per_artist = max(2, fair_share)
 
@@ -66,15 +87,19 @@ def _distribute_by_artist(
     while heap and len(result) < num_tracks:
         neg, t, artist = heapq.heappop(heap)
 
-        if artist == prev_artist and heap:
-            # Can't use this artist back-to-back — try the next best
-            neg2, t2, artist2 = heapq.heappop(heap)
-            result.append(artist_queues[artist2].popleft())
-            prev_artist = artist2
-            if artist_queues[artist2]:
-                heapq.heappush(heap, (-len(artist_queues[artist2]), tb, artist2))
-                tb += 1
-            heapq.heappush(heap, (neg, t, artist))  # put original back
+        if artist == prev_artist:
+            if heap:
+                # Swap with the next-best artist
+                neg2, t2, artist2 = heapq.heappop(heap)
+                result.append(artist_queues[artist2].popleft())
+                prev_artist = artist2
+                if artist_queues[artist2]:
+                    heapq.heappush(heap, (-len(artist_queues[artist2]), tb, artist2))
+                    tb += 1
+                heapq.heappush(heap, (neg, t, artist))
+            else:
+                # No alternative left — stop rather than force consecutive
+                break
         else:
             result.append(artist_queues[artist].popleft())
             prev_artist = artist
@@ -83,6 +108,7 @@ def _distribute_by_artist(
                 tb += 1
 
     return result
+
 
 class AIClient:
     """Client for AI-powered track curation using configurable providers"""
