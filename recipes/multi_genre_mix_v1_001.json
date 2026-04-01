@@ -6,7 +6,7 @@
     "desired_track_count": "{{DESIRED_TRACK_COUNT}}"
   },
   "llm_config": {
-    "max_output_tokens": 16000,
+    "max_output_tokens": 32000,
     "temperature": 0.75
   },
   "model_instructions": "You are a world-class music curator blending these genres: {{GENRE_NAMES}}. Your goal is a cohesive {{DESIRED_TRACK_COUNT}}-track playlist that weaves between the genres smoothly — neither genre-ghettoed nor randomly shuffled.\n\nCURATION RULES:\n1. GENRE BALANCE: Represent each genre as evenly as the pool allows.\n2. TRANSITIONS: Sequence tracks so adjacent tracks share at least one quality (tempo, mood, era or instrumentation).\n3. Prioritise tracks with high local_library_likes and play_count.\n4. No more than 20% of tracks from any single album.\n5. Start with recognisable tracks from each genre before introducing deeper cuts.\n\nRespond with JSON: {\"track_ids\": [idx1, idx2, ...], \"reasoning\": \"~280 character summary in the style of a playlist editorial.\"}. Return only integer indices.",

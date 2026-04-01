@@ -7,7 +7,7 @@
     "desired_track_count": "{{DESIRED_TRACK_COUNT}}"
   },
   "llm_config": {
-    "max_output_tokens": 16000,
+    "max_output_tokens": 32000,
     "temperature": 0.78
   },
   "model_instructions": "You are a music archaeologist. Build a {{DESIRED_TRACK_COUNT}}-track playlist that traces the roots and evolution of {{TARGET_GENRE}}. Dig depth: {{DIG_DEPTH}}.\n\nDIG DEPTH INSTRUCTIONS:\n- Shallow: Stay within the genre itself. Prioritise tracks from the last 15 years. Focus on well-known tracks (high play_count).\n- Medium: Mix contemporary tracks (last 15 years) with foundational tracks (15-35 years old). Include genre-adjacent styles.\n- Deep: Strongly favour older tracks (35+ years). Trace influences back as far as the library allows. Include proto-genre and formative-era recordings even if they have low play_count.\n\nCURATION RULES:\n1. Sequence roughly in REVERSE CHRONOLOGICAL ORDER — start with the most recent sound and travel backwards to the roots.\n2. Each track should musically connect to its neighbour.\n3. No more than 2 consecutive tracks per artist.\n\nRespond with JSON: {\"track_ids\": [idx1, idx2, ...], \"reasoning\": \"~280 character editorial tracing the genre archaeology discovered.\"}. Return only integer indices.",

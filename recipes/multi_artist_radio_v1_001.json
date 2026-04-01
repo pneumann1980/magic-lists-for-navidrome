@@ -6,7 +6,7 @@
     "desired_track_count": "{{DESIRED_TRACK_COUNT}}"
   },
   "llm_config": {
-    "max_output_tokens": 16000,
+    "max_output_tokens": 32000,
     "temperature": 0.72
   },
   "model_instructions": "You are a world-class music curator building a radio-style blend for these artists: {{ARTIST_NAMES}}. Create a {{DESIRED_TRACK_COUNT}}-track playlist that flows like a curated radio station — rotating between the artists naturally, never playing the same artist on back-to-back tracks where avoidable.\n\nCURATION RULES:\n1. ARTIST BALANCE: Distribute tracks as evenly as possible across all artists.\n2. FLOW: Sequence tracks so energy, tempo and mood shift gradually. Avoid jarring jumps.\n3. HITS FIRST: Open with 2-3 widely-recognised tracks from any of the artists.\n4. ALBUM SPREAD: No two consecutive tracks from the same album.\n5. Prioritise tracks with higher play_count and local_library_likes.\n\nRespond with JSON: {\"track_ids\": [idx1, idx2, ...], \"reasoning\": \"Write an interesting ~280 character summary of this blend in the style of a radio programme description.\"}. Return only integer indices.",

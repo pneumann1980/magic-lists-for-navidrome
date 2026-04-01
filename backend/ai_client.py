@@ -410,8 +410,8 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
                         print(f"❌ AI returned no tracks - invalid response")
                         raise ValueError("AI response validation failed: No tracks returned")
 
-                    # Check 2: Reasonable upper bound
-                    max_reasonable = int(num_tracks * 1.5)  # Allow up to 1.5x requested for minor flexibility
+                    # Check 2: Reasonable upper bound (allow 2× since we request 1.2× from AI)
+                    max_reasonable = int(num_tracks * 2.0)
                     if returned_track_count > max_reasonable:
                         print(f"❌ AI returned {returned_track_count} tracks, much more than requested {num_tracks}")
                         raise ValueError(f"AI response validation failed: Too many tracks returned ({returned_track_count} vs requested {num_tracks})")
@@ -898,8 +898,11 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
 
             print(f"🔢 Using index-based approach for {len(track_id_map)} tracks")
 
+            # Request 20 % more than needed so distribution/validation has buffer
+            ai_request_count = math.ceil(num_tracks * 1.2)
+
             # Minimal payload for genre mix - only essential data
-            user_content = f"""Select {num_tracks} tracks for a {genre} playlist.
+            user_content = f"""Select {ai_request_count} tracks for a {genre} playlist.
 
 Tracks: {json.dumps(indexed_tracks, separators=(',', ':'), ensure_ascii=False)}
 
@@ -1001,8 +1004,8 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
                         print(f"❌ AI returned no tracks - invalid response")
                         raise ValueError("AI response validation failed: No tracks returned")
 
-                    # Check 2: Reasonable upper bound
-                    max_reasonable = int(num_tracks * 1.5)  # Allow up to 1.5x requested for minor flexibility
+                    # Check 2: Reasonable upper bound (allow 2× since we request 1.2× from AI)
+                    max_reasonable = int(num_tracks * 2.0)
                     if returned_track_count > max_reasonable:
                         print(f"❌ AI returned {returned_track_count} tracks, much more than requested {num_tracks}")
                         raise ValueError(f"AI response validation failed: Too many tracks returned ({returned_track_count} vs requested {num_tracks})")
@@ -1204,7 +1207,8 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
                     raise ValueError("all track_ids must be integers (indices)")
                 if len(track_ids) == 0:
                     raise ValueError("AI returned no tracks")
-                if len(track_ids) > int(num_tracks * 1.5):
+                # Allow up to 2× since we request 1.2× from the AI
+                if len(track_ids) > int(num_tracks * 2.0):
                     raise ValueError(f"AI returned too many tracks: {len(track_ids)}")
 
                 valid_indices = [idx for idx in track_ids if 0 <= idx < len(track_id_map)]
@@ -1260,7 +1264,8 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
         if variety_context:
             model_instructions += f"\n\n{variety_context}"
 
-        user_content = f'Select {num_tracks} tracks for a radio blend of {artist_names_str}.\n\nTracks: __INDEXED_TRACKS__\n\nReturn JSON: {{"track_ids": [indices], "reasoning": "summary"}}'
+        _req = math.ceil(num_tracks * 1.2)
+        user_content = f'Select {_req} tracks for a radio blend of {artist_names_str}.\n\nTracks: __INDEXED_TRACKS__\n\nReturn JSON: {{"track_ids": [indices], "reasoning": "summary"}}'
 
         def fallback(tracks, n, inc_r):
             s = sorted(tracks, key=lambda x: x.get("play_count", 0), reverse=True)
@@ -1299,7 +1304,8 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
         if variety_context:
             model_instructions += f"\n\n{variety_context}"
 
-        user_content = f'Select {num_tracks} tracks for a multi-genre mix of {genre_names_str}.\n\nTracks: __INDEXED_TRACKS__\n\nReturn JSON: {{"track_ids": [indices], "reasoning": "summary"}}'
+        _req = math.ceil(num_tracks * 1.2)
+        user_content = f'Select {_req} tracks for a multi-genre mix of {genre_names_str}.\n\nTracks: __INDEXED_TRACKS__\n\nReturn JSON: {{"track_ids": [indices], "reasoning": "summary"}}'
 
         def fallback(tracks, n, inc_r):
             s = sorted(tracks, key=lambda x: x.get("play_count", 0), reverse=True)
@@ -1341,7 +1347,8 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
         if variety_context:
             model_instructions += f"\n\n{variety_context}"
 
-        user_content = f'Select {num_tracks} tracks for a {decades_str} decade playlist in {mode} mode.\n\nTracks: __INDEXED_TRACKS__\n\nReturn JSON: {{"track_ids": [indices], "reasoning": "summary"}}'
+        _req = math.ceil(num_tracks * 1.2)
+        user_content = f'Select {_req} tracks for a {decades_str} decade playlist in {mode} mode.\n\nTracks: __INDEXED_TRACKS__\n\nReturn JSON: {{"track_ids": [indices], "reasoning": "summary"}}'
 
         def fallback(tracks, n, inc_r):
             rev = (mode != "Discovery")
@@ -1382,7 +1389,8 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
         if variety_context:
             model_instructions += f"\n\n{variety_context}"
 
-        user_content = f'Select {num_tracks} tracks for a sonic journey from {start_artist} to {end_artist}.\n\nTracks: __INDEXED_TRACKS__\n\nReturn JSON: {{"track_ids": [indices], "reasoning": "summary"}}'
+        _req = math.ceil(num_tracks * 1.2)
+        user_content = f'Select {_req} tracks for a sonic journey from {start_artist} to {end_artist}.\n\nTracks: __INDEXED_TRACKS__\n\nReturn JSON: {{"track_ids": [indices], "reasoning": "summary"}}'
 
         def fallback(tracks, n, inc_r):
             s = sorted(tracks, key=lambda x: x.get("play_count", 0), reverse=True)
@@ -1425,7 +1433,8 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
         if variety_context:
             model_instructions += f"\n\n{variety_context}"
 
-        user_content = f'Select {num_tracks} tracks for a {dig_depth} genre archaeology of {genre}.\n\nTracks: __INDEXED_TRACKS__\n\nReturn JSON: {{"track_ids": [indices], "reasoning": "summary"}}'
+        _req = math.ceil(num_tracks * 1.2)
+        user_content = f'Select {_req} tracks for a {dig_depth} genre archaeology of {genre}.\n\nTracks: __INDEXED_TRACKS__\n\nReturn JSON: {{"track_ids": [indices], "reasoning": "summary"}}'
 
         def fallback(tracks, n, inc_r):
             if dig_depth == "Deep":

@@ -43,7 +43,7 @@ logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('httpcore').setLevel(logging.WARNING)
 
 from .navidrome_client import NavidromeClient
-from .ai_client import AIClient, _distribute_by_artist
+from .ai_client import AIClient
 from .database import DatabaseManager, get_db
 from .schemas import CreatePlaylistRequest, CreateGenrePlaylistRequest, Playlist, RediscoverWeeklyResponse, RediscoverWeeklyV2Response, CreateRediscoverPlaylistRequest, PlaylistWithScheduleInfo, UpdatePlaylistSettingsRequest, CreateMultiArtistRadioRequest, CreateMultiGenreMixRequest, CreateDecadeDiscoveryRequest, CreateSonicJourneyRequest, CreateGenreArchaeologyRequest
 from .recipe_manager import recipe_manager
@@ -1777,15 +1777,15 @@ async def refresh_genre_mix_playlist(scheduled_playlist, db: DatabaseManager):
             return
 
         if curated_track_ids:
-            # Fill any gap if AI returned fewer tracks than requested, then re-distribute
+            # Fill any gap if the final list is short
             if len(curated_track_ids) < original_length and len(all_tracks) >= original_length:
-                scheduler_logger.warning(f"⚠️ AI returned only {len(curated_track_ids)} tracks but user requested {original_length}. Filling gap.")
+                scheduler_logger.warning(f"⚠️ Got only {len(curated_track_ids)} tracks but user requested {original_length}. Filling gap.")
                 used_ids = set(curated_track_ids)
                 remaining = [t for t in all_tracks if t["id"] not in used_ids]
                 curated_track_ids.extend([t["id"] for t in remaining[:original_length - len(curated_track_ids)]])
-                # Re-distribute the combined list so gap-filled tracks are also interleaved
-                id_to_artist_map = {t["id"]: t.get("artist") or "Unknown" for t in all_tracks}
-                curated_track_ids = _distribute_by_artist(curated_track_ids, id_to_artist_map, original_length)
+                # NOTE: do NOT re-run full distribution here — it re-caps artists and discards
+                # tracks, leaving the list SHORTER than requested.  The AI-curated portion is
+                # already interleaved; the appended gap-fill tracks are a small tail.
 
             scheduler_logger.info(f"🎯 Final track count: {len(curated_track_ids)} (requested: {original_length})")
 
