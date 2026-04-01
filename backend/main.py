@@ -43,7 +43,7 @@ logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('httpcore').setLevel(logging.WARNING)
 
 from .navidrome_client import NavidromeClient
-from .ai_client import AIClient
+from .ai_client import AIClient, _distribute_by_artist
 from .database import DatabaseManager, get_db
 from .schemas import CreatePlaylistRequest, CreateGenrePlaylistRequest, Playlist, RediscoverWeeklyResponse, RediscoverWeeklyV2Response, CreateRediscoverPlaylistRequest, PlaylistWithScheduleInfo, UpdatePlaylistSettingsRequest, CreateMultiArtistRadioRequest, CreateMultiGenreMixRequest, CreateDecadeDiscoveryRequest, CreateSonicJourneyRequest, CreateGenreArchaeologyRequest
 from .recipe_manager import recipe_manager
@@ -1779,13 +1779,19 @@ async def refresh_genre_mix_playlist(scheduled_playlist, db: DatabaseManager):
         if curated_track_ids:
             # Fill any gap if the final list is short
             if len(curated_track_ids) < original_length and len(all_tracks) >= original_length:
-                scheduler_logger.warning(f"⚠️ Got only {len(curated_track_ids)} tracks but user requested {original_length}. Filling gap.")
+                gap = original_length - len(curated_track_ids)
+                scheduler_logger.warning(f"⚠️ Got only {len(curated_track_ids)} tracks but user requested {original_length}. Filling gap of {gap}.")
                 used_ids = set(curated_track_ids)
                 remaining = [t for t in all_tracks if t["id"] not in used_ids]
-                curated_track_ids.extend([t["id"] for t in remaining[:original_length - len(curated_track_ids)]])
-                # NOTE: do NOT re-run full distribution here — it re-caps artists and discards
-                # tracks, leaving the list SHORTER than requested.  The AI-curated portion is
-                # already interleaved; the appended gap-fill tracks are a small tail.
+                # Distribute gap-fill candidates so they are not alphabetically clustered
+                gap_id_to_artist = {t["id"]: t.get("artist") or "Unknown" for t in remaining}
+                gap_pool = [t["id"] for t in remaining[: gap * 4]]  # 4× pool for good diversity
+                gap_fill = _distribute_by_artist(gap_pool, gap_id_to_artist, gap)
+                # If distribution returned fewer than needed, top up with any remaining tracks
+                if len(gap_fill) < gap:
+                    used_after_gap = set(gap_fill)
+                    gap_fill += [t["id"] for t in remaining if t["id"] not in used_after_gap][: gap - len(gap_fill)]
+                curated_track_ids.extend(gap_fill)
 
             scheduler_logger.info(f"🎯 Final track count: {len(curated_track_ids)} (requested: {original_length})")
 
