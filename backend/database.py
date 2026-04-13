@@ -64,6 +64,13 @@ class DatabaseManager:
                 # Column already exists or other error - ignore
                 pass
 
+            # Add discovery_ratio column if it doesn't exist (for tiered pool strategy)
+            try:
+                await db.execute("ALTER TABLE playlists ADD COLUMN discovery_ratio REAL DEFAULT 0.25")
+            except:
+                # Column already exists or other error - ignore
+                pass
+
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS scheduled_playlists (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -157,18 +164,18 @@ class DatabaseManager:
 
             await db.commit()
     
-    async def create_playlist(self, artist_id: str, playlist_name: str, songs: Optional[List[str]] = None, reasoning: Optional[str] = None, navidrome_playlist_id: Optional[str] = None, playlist_length: Optional[int] = None, library_ids: Optional[List[str]] = None) -> Optional[Playlist]:
+    async def create_playlist(self, artist_id: str, playlist_name: str, songs: Optional[List[str]] = None, reasoning: Optional[str] = None, navidrome_playlist_id: Optional[str] = None, playlist_length: Optional[int] = None, library_ids: Optional[List[str]] = None, discovery_ratio: Optional[float] = None) -> Optional[Playlist]:
         """Create a new playlist in the database"""
         await self.init_db()
-        
+
         songs_json = json.dumps(songs or [])
         library_ids_json = json.dumps(library_ids or [])
 
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute("""
-                INSERT INTO playlists (artist_id, playlist_name, songs, reasoning, navidrome_playlist_id, playlist_length, library_ids)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (artist_id, playlist_name, songs_json, reasoning, navidrome_playlist_id, playlist_length, library_ids_json))
+                INSERT INTO playlists (artist_id, playlist_name, songs, reasoning, navidrome_playlist_id, playlist_length, library_ids, discovery_ratio)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (artist_id, playlist_name, songs_json, reasoning, navidrome_playlist_id, playlist_length, library_ids_json, discovery_ratio))
             
             playlist_id = cursor.lastrowid
             await db.commit()
@@ -252,26 +259,27 @@ class DatabaseManager:
         playlists = []
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute("""
-                SELECT 
-                    p.id, 
-                    p.artist_id, 
-                    p.playlist_name, 
-                    p.songs, 
+                SELECT
+                    p.id,
+                    p.artist_id,
+                    p.playlist_name,
+                    p.songs,
                     p.reasoning,
                     p.navidrome_playlist_id,
-                    p.created_at, 
+                    p.created_at,
                     p.updated_at,
                     p.last_refreshed,
                     p.playlist_length,
                     sp.refresh_frequency,
                     sp.next_refresh,
-                    sp.playlist_type
+                    sp.playlist_type,
+                    p.discovery_ratio
                 FROM playlists p
                 LEFT JOIN scheduled_playlists sp ON p.navidrome_playlist_id = sp.navidrome_playlist_id
                 ORDER BY p.created_at DESC
             """) as cursor:
                 rows = await cursor.fetchall()
-                
+
                 for row in rows:
                     playlist_data = {
                         "id": row[0],
@@ -286,7 +294,8 @@ class DatabaseManager:
                         "playlist_length": row[9],
                         "refresh_frequency": row[10],
                         "next_refresh": row[11],
-                        "playlist_type": row[12]
+                        "playlist_type": row[12],
+                        "discovery_ratio": row[13] if row[13] is not None else 0.25,
                     }
                     playlists.append(playlist_data)
         

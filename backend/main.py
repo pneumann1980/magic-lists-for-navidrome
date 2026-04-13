@@ -48,7 +48,7 @@ from .database import DatabaseManager, get_db
 from .schemas import CreatePlaylistRequest, CreateGenrePlaylistRequest, Playlist, RediscoverWeeklyResponse, RediscoverWeeklyV2Response, CreateRediscoverPlaylistRequest, PlaylistWithScheduleInfo, UpdatePlaylistSettingsRequest, CreateMultiArtistRadioRequest, CreateMultiGenreMixRequest, CreateDecadeDiscoveryRequest, CreateSonicJourneyRequest, CreateGenreArchaeologyRequest
 from .recipe_manager import recipe_manager
 from .rediscover import RediscoverWeekly, ReDiscoverV2Processor
-from .track_scoring import filter_tracks_for_this_is_playlist
+from .track_scoring import filter_tracks_for_this_is_playlist, build_tiered_pool, calculate_filter_threshold
 # SYSTEM CHECK FEATURE - START
 from .services.health_check_service import HealthCheckService
 # SYSTEM CHECK FEATURE - END
@@ -303,31 +303,25 @@ async def create_playlist(
         if not all_tracks:
             raise HTTPException(status_code=404, detail="No tracks found for the selected artists")
         
-        # NEW: Apply smart filtering for "This Is" playlists to optimize LLM payload
+        # Apply tiered pool strategy for "This Is" playlists (fixed discovery ratio = 0.10)
+        THIS_IS_DISCOVERY_RATIO = 0.10
         library_stats = await nav_client.get_library_stats()
-        
-        filtered_tracks, filter_metadata = filter_tracks_for_this_is_playlist(
+        pool_size = request.playlist_length * calculate_filter_threshold(request.playlist_length)
+        tracks_for_llm, pool_meta = build_tiered_pool(
             source_tracks=all_tracks,
-            target_playlist_size=request.playlist_length,
+            pool_size=pool_size,
+            discovery_ratio=THIS_IS_DISCOVERY_RATIO,
             library_stats=library_stats
         )
-        
-        # Log filtering results for analytics/debugging
-        if filter_metadata['filtered']:
-            scheduler_logger.info(f"🎯 Smart filtering applied: {filter_metadata['source_count']} → {filter_metadata['sent_count']} tracks (multiplier: {filter_metadata['threshold_multiplier']}x)")
-            scheduler_logger.info(f"📊 Score range: {filter_metadata['score_range']['highest']:.1f} - {filter_metadata['score_range']['lowest']:.1f} (cutoff: {filter_metadata['score_range']['cutoff']:.1f})")
-        else:
-            scheduler_logger.info(f"✅ No filtering needed: {filter_metadata['source_count']} tracks below threshold")
-        
-        # Use filtered tracks for LLM processing
-        tracks_for_llm = filtered_tracks
-        
+        scheduler_logger.info(f"🎯 Tiered pool: {pool_meta.get('source_count', len(all_tracks))} → {pool_meta.get('sent_count', len(tracks_for_llm))} tracks (discovery={THIS_IS_DISCOVERY_RATIO:.0%})")
+
         # Use AI to curate the playlist (always include reasoning for new recipe format)
         curation_result = await ai_client_instance.curate_this_is(
             artist_name=', '.join(artist_names),
             tracks_json=tracks_for_llm,
             num_tracks=request.playlist_length,
-            include_reasoning=True
+            include_reasoning=True,
+            variety_context=_discovery_hint(THIS_IS_DISCOVERY_RATIO)
         )
         
         # Handle both old and new return formats
@@ -383,13 +377,14 @@ async def create_playlist(
             reasoning=reasoning,
             navidrome_playlist_id=navidrome_playlist_id,
             playlist_length=request.playlist_length,
-            library_ids=request.library_ids
+            library_ids=request.library_ids,
+            discovery_ratio=THIS_IS_DISCOVERY_RATIO
         )
-        
+
         # Handle scheduling if not "none" or "never"
         if request.refresh_frequency not in ["none", "never"]:
             next_refresh = calculate_next_refresh(request.refresh_frequency)
-            
+
             # Store the scheduled playlist
             await db.create_scheduled_playlist(
                 playlist_type="this_is",
@@ -512,31 +507,24 @@ async def create_genre_playlist(
         if not all_tracks:
             raise HTTPException(status_code=404, detail=f"No tracks found for genre: {request.genre}")
 
-        # NEW: Apply smart filtering for "Genre Mix" playlists to optimize LLM payload
+        # Apply tiered pool strategy for Genre Mix playlists
         library_stats = await nav_client.get_library_stats()
-
-        filtered_tracks, filter_metadata = filter_tracks_for_this_is_playlist(
+        pool_size = request.playlist_length * calculate_filter_threshold(request.playlist_length)
+        tracks_for_llm, pool_meta = build_tiered_pool(
             source_tracks=all_tracks,
-            target_playlist_size=request.playlist_length,
+            pool_size=pool_size,
+            discovery_ratio=request.discovery_ratio,
             library_stats=library_stats
         )
-
-        # Log filtering results for analytics/debugging
-        if filter_metadata['filtered']:
-            scheduler_logger.info(f"🎯 Smart filtering applied: {filter_metadata['source_count']} → {filter_metadata['sent_count']} tracks (multiplier: {filter_metadata['threshold_multiplier']}x)")
-            scheduler_logger.info(f"📊 Score range: {filter_metadata['score_range']['highest']:.1f} - {filter_metadata['score_range']['lowest']:.1f} (cutoff: {filter_metadata['score_range']['cutoff']:.1f})")
-        else:
-            scheduler_logger.info(f"✅ No filtering needed: {filter_metadata['source_count']} tracks below threshold")
-
-        # Use filtered tracks for LLM processing
-        tracks_for_llm = filtered_tracks
+        scheduler_logger.info(f"🎯 Tiered pool: {pool_meta.get('source_count', len(all_tracks))} → {pool_meta.get('sent_count', len(tracks_for_llm))} tracks (discovery={request.discovery_ratio:.0%})")
 
         # Use AI to curate the playlist (always include reasoning for new recipe format)
         curation_result = await ai_client_instance.curate_genre_mix(
             genre=request.genre,
             tracks_json=tracks_for_llm,
             num_tracks=request.playlist_length,
-            include_reasoning=True
+            include_reasoning=True,
+            variety_context=_discovery_hint(request.discovery_ratio)
         )
 
         # Handle both old and new return formats
@@ -591,7 +579,8 @@ async def create_genre_playlist(
             reasoning=reasoning,
             navidrome_playlist_id=navidrome_playlist_id,
             playlist_length=request.playlist_length,
-            library_ids=request.library_ids
+            library_ids=request.library_ids,
+            discovery_ratio=request.discovery_ratio
         )
 
         # Handle scheduling if not "none" or "never"
@@ -647,14 +636,18 @@ async def create_multi_artist_radio(
         if not all_tracks:
             raise HTTPException(status_code=404, detail="No tracks found for selected artists")
 
+        MAR_DISCOVERY_RATIO = 0.15
         library_stats = await nav_client.get_library_stats()
-        filtered_tracks, _ = filter_tracks_for_this_is_playlist(all_tracks, request.playlist_length, library_stats)
+        pool_size = request.playlist_length * calculate_filter_threshold(request.playlist_length)
+        filtered_tracks, pool_meta = build_tiered_pool(all_tracks, pool_size, MAR_DISCOVERY_RATIO, library_stats)
+        scheduler_logger.info(f"🎯 Tiered pool (multi_artist_radio): {pool_meta.get('source_count', len(all_tracks))} → {pool_meta.get('sent_count', len(filtered_tracks))} tracks")
 
         curation_result = await ai_client_instance.curate_multi_artist_radio(
             artist_names=artist_names,
             tracks_json=filtered_tracks,
             num_tracks=request.playlist_length,
-            include_reasoning=True
+            include_reasoning=True,
+            variety_context=_discovery_hint(MAR_DISCOVERY_RATIO)
         )
         curated_track_ids, reasoning = curation_result if isinstance(curation_result, tuple) else (curation_result, "")
 
@@ -675,7 +668,8 @@ async def create_multi_artist_radio(
             reasoning=reasoning,
             navidrome_playlist_id=navidrome_playlist_id,
             playlist_length=request.playlist_length,
-            library_ids=request.library_ids
+            library_ids=request.library_ids,
+            discovery_ratio=MAR_DISCOVERY_RATIO
         )
 
         if request.refresh_frequency not in ["none", "never"]:
@@ -713,13 +707,16 @@ async def create_multi_genre_mix(
             raise HTTPException(status_code=404, detail="No tracks found for selected genres")
 
         library_stats = await nav_client.get_library_stats()
-        filtered_tracks, _ = filter_tracks_for_this_is_playlist(all_tracks, request.playlist_length, library_stats)
+        pool_size = request.playlist_length * calculate_filter_threshold(request.playlist_length)
+        filtered_tracks, pool_meta = build_tiered_pool(all_tracks, pool_size, request.discovery_ratio, library_stats)
+        scheduler_logger.info(f"🎯 Tiered pool (multi_genre_mix): {pool_meta.get('source_count', len(all_tracks))} → {pool_meta.get('sent_count', len(filtered_tracks))} tracks (discovery={request.discovery_ratio:.0%})")
 
         curation_result = await ai_client_instance.curate_multi_genre_mix(
             genre_names=request.genres,
             tracks_json=filtered_tracks,
             num_tracks=request.playlist_length,
-            include_reasoning=True
+            include_reasoning=True,
+            variety_context=_discovery_hint(request.discovery_ratio)
         )
         curated_track_ids, reasoning = curation_result if isinstance(curation_result, tuple) else (curation_result, "")
 
@@ -740,7 +737,8 @@ async def create_multi_genre_mix(
             reasoning=reasoning,
             navidrome_playlist_id=navidrome_playlist_id,
             playlist_length=request.playlist_length,
-            library_ids=request.library_ids
+            library_ids=request.library_ids,
+            discovery_ratio=request.discovery_ratio
         )
 
         if request.refresh_frequency not in ["none", "never"]:
@@ -796,18 +794,22 @@ async def create_decade_discovery(
         if not all_tracks:
             raise HTTPException(status_code=404, detail=f"No tracks found for selected decade(s)")
 
+        library_stats = await nav_client.get_library_stats()
+        pool_size = request.playlist_length * calculate_filter_threshold(request.playlist_length)
+        # Discovery mode: use full set unfiltered; otherwise apply tiered pool
         if request.mode == "Discovery":
             tracks_for_llm = all_tracks
         else:
-            library_stats = await nav_client.get_library_stats()
-            tracks_for_llm, _ = filter_tracks_for_this_is_playlist(all_tracks, request.playlist_length, library_stats)
+            tracks_for_llm, pool_meta = build_tiered_pool(all_tracks, pool_size, request.discovery_ratio, library_stats)
+            scheduler_logger.info(f"🎯 Tiered pool (decade_discovery): {pool_meta.get('source_count', len(all_tracks))} → {pool_meta.get('sent_count', len(tracks_for_llm))} tracks (discovery={request.discovery_ratio:.0%})")
 
         curation_result = await ai_client_instance.curate_decade_discovery(
             decades=request.decades,
             mode=request.mode,
             tracks_json=tracks_for_llm,
             num_tracks=request.playlist_length,
-            include_reasoning=True
+            include_reasoning=True,
+            variety_context=_discovery_hint(request.discovery_ratio)
         )
         curated_track_ids, reasoning = curation_result if isinstance(curation_result, tuple) else (curation_result, "")
 
@@ -829,7 +831,8 @@ async def create_decade_discovery(
             reasoning=reasoning,
             navidrome_playlist_id=navidrome_playlist_id,
             playlist_length=request.playlist_length,
-            library_ids=request.library_ids
+            library_ids=request.library_ids,
+            discovery_ratio=request.discovery_ratio
         )
 
         if request.refresh_frequency not in ["none", "never"]:
@@ -876,14 +879,18 @@ async def create_sonic_journey(
             raise HTTPException(status_code=404, detail="No tracks found in library")
 
         library_stats = await nav_client.get_library_stats()
-        filtered_tracks, _ = filter_tracks_for_this_is_playlist(all_tracks, request.playlist_length * 4, library_stats)
+        # Sonic Journey uses a large pool from the whole library
+        sj_pool_size = request.playlist_length * 4 * calculate_filter_threshold(request.playlist_length * 4)
+        filtered_tracks, pool_meta = build_tiered_pool(all_tracks, sj_pool_size, request.discovery_ratio, library_stats)
+        scheduler_logger.info(f"🎯 Tiered pool (sonic_journey): {pool_meta.get('source_count', len(all_tracks))} → {pool_meta.get('sent_count', len(filtered_tracks))} tracks (discovery={request.discovery_ratio:.0%})")
 
         curation_result = await ai_client_instance.curate_sonic_journey(
             start_artist=start_artist_name,
             end_artist=end_artist_name,
             tracks_json=filtered_tracks,
             num_tracks=request.playlist_length,
-            include_reasoning=True
+            include_reasoning=True,
+            variety_context=_discovery_hint(request.discovery_ratio)
         )
         curated_track_ids, reasoning = curation_result if isinstance(curation_result, tuple) else (curation_result, "")
 
@@ -909,7 +916,8 @@ async def create_sonic_journey(
             reasoning=reasoning,
             navidrome_playlist_id=navidrome_playlist_id,
             playlist_length=request.playlist_length,
-            library_ids=request.library_ids
+            library_ids=request.library_ids,
+            discovery_ratio=request.discovery_ratio
         )
 
         if request.refresh_frequency not in ["none", "never"]:
@@ -946,18 +954,22 @@ async def create_genre_archaeology(
         if not all_tracks:
             raise HTTPException(status_code=404, detail=f"No tracks found for genre: {request.genre}")
 
+        library_stats = await nav_client.get_library_stats()
+        pool_size = request.playlist_length * calculate_filter_threshold(request.playlist_length)
+        # Deep dig: use full set unfiltered; otherwise apply tiered pool
         if request.dig_depth == "Deep":
             tracks_for_llm = all_tracks
         else:
-            library_stats = await nav_client.get_library_stats()
-            tracks_for_llm, _ = filter_tracks_for_this_is_playlist(all_tracks, request.playlist_length, library_stats)
+            tracks_for_llm, pool_meta = build_tiered_pool(all_tracks, pool_size, request.discovery_ratio, library_stats)
+            scheduler_logger.info(f"🎯 Tiered pool (genre_archaeology): {pool_meta.get('source_count', len(all_tracks))} → {pool_meta.get('sent_count', len(tracks_for_llm))} tracks (discovery={request.discovery_ratio:.0%})")
 
         curation_result = await ai_client_instance.curate_genre_archaeology(
             genre=request.genre,
             dig_depth=request.dig_depth,
             tracks_json=tracks_for_llm,
             num_tracks=request.playlist_length,
-            include_reasoning=True
+            include_reasoning=True,
+            variety_context=_discovery_hint(request.discovery_ratio)
         )
         curated_track_ids, reasoning = curation_result if isinstance(curation_result, tuple) else (curation_result, "")
 
@@ -978,7 +990,8 @@ async def create_genre_archaeology(
             reasoning=reasoning,
             navidrome_playlist_id=navidrome_playlist_id,
             playlist_length=request.playlist_length,
-            library_ids=request.library_ids
+            library_ids=request.library_ids,
+            discovery_ratio=request.discovery_ratio
         )
 
         if request.refresh_frequency not in ["none", "never"]:
@@ -1330,6 +1343,16 @@ def calculate_next_refresh(frequency: str) -> datetime:
         return next_month
     else:
         return now  # Fallback
+
+
+def _discovery_hint(ratio: float) -> str:
+    """Return an AI variety_context hint based on the discovery ratio."""
+    if ratio >= 0.4:
+        return "DISCOVERY: Prioritize lesser-known tracks, deep cuts, and emerging artists over mainstream hits."
+    elif ratio >= 0.2:
+        return "BALANCE: Mix popular favourites with some lesser-known gems and overlooked tracks."
+    else:
+        return "FAMILIAR: Focus on well-loved, popular tracks the listener already knows."
 
 
 def _is_transient_fallback(reasoning: str) -> bool:
@@ -1737,20 +1760,15 @@ async def refresh_genre_mix_playlist(scheduled_playlist, db: DatabaseManager):
             candidate_tracks = all_tracks
             scheduler_logger.info(f"🔄 Library too small to fully exclude previous tracks; using full set of {len(candidate_tracks)}")
 
-        # Apply smart filtering to optimise LLM payload
+        # Apply tiered pool strategy using stored discovery_ratio
+        stored_discovery_ratio = original_playlist.get("discovery_ratio", 0.25)
         library_stats = await nav_client.get_library_stats()
-        filtered_tracks, filter_metadata = filter_tracks_for_this_is_playlist(
-            source_tracks=candidate_tracks,
-            target_playlist_size=original_length,
-            library_stats=library_stats
-        )
-        if filter_metadata['filtered']:
-            scheduler_logger.info(f"🎯 Smart filtering applied: {filter_metadata['source_count']} → {filter_metadata['sent_count']} tracks")
+        pool_size = original_length * calculate_filter_threshold(original_length)
+        filtered_tracks, pool_meta = build_tiered_pool(candidate_tracks, pool_size, stored_discovery_ratio, library_stats)
+        scheduler_logger.info(f"🎯 Tiered pool (refresh genre_mix): {pool_meta.get('source_count', len(candidate_tracks))} → {pool_meta.get('sent_count', len(filtered_tracks))} tracks (discovery={stored_discovery_ratio:.0%})")
 
-        variety_instruction = (
-            "REFRESH: Keep the listening experience fresh — vary the mood, era mix, and track sequence significantly from last time."
-            if previous_songs else "Create a fresh, engaging playlist arrangement."
-        )
+        variety_instruction = "REFRESH: Keep the listening experience fresh — vary the mood, era mix, and track sequence significantly from last time." if previous_songs else "Create a fresh, engaging playlist arrangement."
+        variety_instruction += "\n" + _discovery_hint(stored_discovery_ratio)
 
         curation_result = await ai_client_instance.curate_genre_mix(
             genre=genre,
@@ -1860,9 +1878,12 @@ async def refresh_multi_artist_radio_playlist(scheduled_playlist, db: DatabaseMa
         previous_titles = set(previous_songs)
         tracks_without_previous = [t for t in all_tracks if t.get("title", "") not in previous_titles]
         candidate_tracks = tracks_without_previous if len(tracks_without_previous) >= original_length else all_tracks
+        stored_discovery_ratio = original_playlist.get("discovery_ratio", 0.15)
         library_stats = await nav_client.get_library_stats()
-        filtered_tracks, _ = filter_tracks_for_this_is_playlist(candidate_tracks, original_length, library_stats)
-        variety_context = "REFRESH: Keep the selection fresh — vary mood, tempo, and track order significantly." if previous_songs else None
+        pool_size = original_length * calculate_filter_threshold(original_length)
+        filtered_tracks, _ = build_tiered_pool(candidate_tracks, pool_size, stored_discovery_ratio, library_stats)
+        refresh_hint = "REFRESH: Keep the selection fresh — vary mood, tempo, and track order significantly." if previous_songs else ""
+        variety_context = (refresh_hint + "\n" + _discovery_hint(stored_discovery_ratio)).strip() or None
 
         curation_result = await ai_client_instance.curate_multi_artist_radio(
             artist_names=artist_names, tracks_json=filtered_tracks, num_tracks=original_length,
@@ -1921,9 +1942,12 @@ async def refresh_multi_genre_mix_playlist(scheduled_playlist, db: DatabaseManag
         previous_titles = set(previous_songs)
         tracks_without_previous = [t for t in all_tracks if t.get("title", "") not in previous_titles]
         candidate_tracks = tracks_without_previous if len(tracks_without_previous) >= original_length else all_tracks
+        stored_discovery_ratio = original_playlist.get("discovery_ratio", 0.25)
         library_stats = await nav_client.get_library_stats()
-        filtered_tracks, _ = filter_tracks_for_this_is_playlist(candidate_tracks, original_length, library_stats)
-        variety_context = "REFRESH: Keep the selection fresh — vary mood, tempo, and track order significantly." if previous_songs else None
+        pool_size = original_length * calculate_filter_threshold(original_length)
+        filtered_tracks, _ = build_tiered_pool(candidate_tracks, pool_size, stored_discovery_ratio, library_stats)
+        refresh_hint = "REFRESH: Keep the selection fresh — vary mood, tempo, and track order significantly." if previous_songs else ""
+        variety_context = (refresh_hint + "\n" + _discovery_hint(stored_discovery_ratio)).strip() or None
 
         curation_result = await ai_client_instance.curate_multi_genre_mix(
             genre_names=genres, tracks_json=filtered_tracks, num_tracks=original_length,
@@ -1985,14 +2009,20 @@ async def refresh_decade_discovery_playlist(scheduled_playlist, db: DatabaseMana
         tracks_without_previous = [t for t in all_tracks if t.get("title", "") not in previous_titles]
         candidate_tracks = tracks_without_previous if len(tracks_without_previous) >= original_length else all_tracks
 
+        stored_discovery_ratio = original_playlist.get("discovery_ratio", 0.25)
+        library_stats = await nav_client.get_library_stats()
+        pool_size = original_length * calculate_filter_threshold(original_length)
         if mode == "Discovery":
             tracks_for_llm = candidate_tracks
         else:
-            library_stats = await nav_client.get_library_stats()
-            tracks_for_llm, _ = filter_tracks_for_this_is_playlist(candidate_tracks, original_length, library_stats)
+            tracks_for_llm, _ = build_tiered_pool(candidate_tracks, pool_size, stored_discovery_ratio, library_stats)
+
+        refresh_hint = "REFRESH: Keep the selection fresh — vary mood, era mix, and track order significantly." if previous_songs else ""
+        variety_context = (refresh_hint + "\n" + _discovery_hint(stored_discovery_ratio)).strip() or None
 
         curation_result = await ai_client_instance.curate_decade_discovery(
-            decades=decades, mode=mode, tracks_json=tracks_for_llm, num_tracks=original_length, include_reasoning=True
+            decades=decades, mode=mode, tracks_json=tracks_for_llm, num_tracks=original_length, include_reasoning=True,
+            variety_context=variety_context
         )
         curated_track_ids, reasoning = curation_result if isinstance(curation_result, tuple) else (curation_result, "")
 
@@ -2048,12 +2078,17 @@ async def refresh_sonic_journey_playlist(scheduled_playlist, db: DatabaseManager
         tracks_without_previous = [t for t in all_tracks if t.get("title", "") not in previous_titles]
         candidate_tracks = tracks_without_previous if len(tracks_without_previous) >= original_length else all_tracks
 
+        stored_discovery_ratio = original_playlist.get("discovery_ratio", 0.20)
         library_stats = await nav_client.get_library_stats()
-        filtered_tracks, _ = filter_tracks_for_this_is_playlist(candidate_tracks, original_length * 4, library_stats)
+        sj_pool_size = original_length * 4 * calculate_filter_threshold(original_length * 4)
+        filtered_tracks, _ = build_tiered_pool(candidate_tracks, sj_pool_size, stored_discovery_ratio, library_stats)
+        refresh_hint = "REFRESH: Keep the selection fresh — vary mood, tempo, and track order significantly." if previous_songs else ""
+        variety_context = (refresh_hint + "\n" + _discovery_hint(stored_discovery_ratio)).strip() or None
 
         curation_result = await ai_client_instance.curate_sonic_journey(
             start_artist=start_artist_name, end_artist=end_artist_name,
-            tracks_json=filtered_tracks, num_tracks=original_length, include_reasoning=True
+            tracks_json=filtered_tracks, num_tracks=original_length, include_reasoning=True,
+            variety_context=variety_context
         )
         curated_track_ids, reasoning = curation_result if isinstance(curation_result, tuple) else (curation_result, "")
 
@@ -2109,15 +2144,21 @@ async def refresh_genre_archaeology_playlist(scheduled_playlist, db: DatabaseMan
         tracks_without_previous = [t for t in all_tracks if t.get("title", "") not in previous_titles]
         candidate_tracks = tracks_without_previous if len(tracks_without_previous) >= original_length else all_tracks
 
+        stored_discovery_ratio = original_playlist.get("discovery_ratio", 0.30)
+        library_stats = await nav_client.get_library_stats()
+        pool_size = original_length * calculate_filter_threshold(original_length)
         if dig_depth == "Deep":
             tracks_for_llm = candidate_tracks
         else:
-            library_stats = await nav_client.get_library_stats()
-            tracks_for_llm, _ = filter_tracks_for_this_is_playlist(candidate_tracks, original_length, library_stats)
+            tracks_for_llm, _ = build_tiered_pool(candidate_tracks, pool_size, stored_discovery_ratio, library_stats)
+
+        refresh_hint = "REFRESH: Keep the selection fresh — vary mood, era mix, and track order significantly." if previous_songs else ""
+        variety_context = (refresh_hint + "\n" + _discovery_hint(stored_discovery_ratio)).strip() or None
 
         curation_result = await ai_client_instance.curate_genre_archaeology(
             genre=genre, dig_depth=dig_depth, tracks_json=tracks_for_llm,
-            num_tracks=original_length, include_reasoning=True
+            num_tracks=original_length, include_reasoning=True,
+            variety_context=variety_context
         )
         curated_track_ids, reasoning = curation_result if isinstance(curation_result, tuple) else (curation_result, "")
 

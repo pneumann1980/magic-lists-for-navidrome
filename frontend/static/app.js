@@ -894,6 +894,7 @@ async function createGenrePlaylist() {
         const refreshFrequency = document.querySelector('input[name="genre-refresh-frequency"]:checked').value;
         const playlistLength = document.querySelector('input[name="genre-playlist-length"]:checked').value;
 
+        const genreDiscoveryRatio = parseFloat(document.getElementById('genre-discovery-ratio').value) / 100;
         const response = await fetch('/api/create_genre_playlist', {
             method: 'POST',
             headers: {
@@ -903,7 +904,8 @@ async function createGenrePlaylist() {
                 genre: selectedGenre,
                 refresh_frequency: refreshFrequency,
                 playlist_length: parseInt(playlistLength),
-                library_ids: selectedLibraryIds
+                library_ids: selectedLibraryIds,
+                discovery_ratio: genreDiscoveryRatio
             })
         });
 
@@ -1115,6 +1117,18 @@ async function loadPlaylists() {
 function truncateText(text, maxLength) {
     if (!text) return '';
     return text.length > maxLength ? text.substring(0, maxLength) + '...' : text;
+}
+
+function updateDiscoveryLabel(labelId, value) {
+    const pct = parseInt(value);
+    let desc;
+    if (pct === 0) desc = 'Familiar only (0%)';
+    else if (pct <= 15) desc = `Mostly familiar (${pct}%)`;
+    else if (pct <= 30) desc = `Balanced (${pct}%)`;
+    else if (pct <= 50) desc = `More discovery (${pct}%)`;
+    else desc = `Max discovery (${pct}%)`;
+    const el = document.getElementById(labelId);
+    if (el) el.textContent = desc;
 }
 
 function renderPlaylists(playlists) {
@@ -1887,7 +1901,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 const response = await fetch('/api/create-multi-genre-mix', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ genres: mgmSelectedGenres, refresh_frequency: refreshFrequency, playlist_length: playlistLength, library_ids: selectedLibraryIds })
+                    body: JSON.stringify({ genres: mgmSelectedGenres, refresh_frequency: refreshFrequency, playlist_length: playlistLength, library_ids: selectedLibraryIds, discovery_ratio: parseFloat(document.getElementById('mgm-discovery-ratio').value) / 100 })
                 });
                 if (!response.ok) { const err = await response.json().catch(() => ({ detail: 'Unknown error' })); throw new Error(err.detail || 'Failed'); }
                 const data = await response.json();
@@ -1951,7 +1965,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 const response = await fetch('/api/create-decade-discovery', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ decades: ddSelectedDecades, mode: mode, refresh_frequency: refreshFrequency, playlist_length: playlistLength, library_ids: selectedLibraryIds })
+                    body: JSON.stringify({ decades: ddSelectedDecades, mode: mode, refresh_frequency: refreshFrequency, playlist_length: playlistLength, library_ids: selectedLibraryIds, discovery_ratio: parseFloat(document.getElementById('dd-discovery-ratio').value) / 100 })
                 });
                 if (!response.ok) { const err = await response.json().catch(() => ({ detail: 'Unknown error' })); throw new Error(err.detail || 'Failed'); }
                 const data = await response.json();
@@ -2016,7 +2030,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 const response = await fetch('/api/create-sonic-journey', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ start_artist_id: sjStartArtistId, end_artist_id: sjEndArtistId, refresh_frequency: refreshFrequency, playlist_length: playlistLength, library_ids: selectedLibraryIds })
+                    body: JSON.stringify({ start_artist_id: sjStartArtistId, end_artist_id: sjEndArtistId, refresh_frequency: refreshFrequency, playlist_length: playlistLength, library_ids: selectedLibraryIds, discovery_ratio: parseFloat(document.getElementById('sj-discovery-ratio').value) / 100 })
                 });
                 if (!response.ok) { const err = await response.json().catch(() => ({ detail: 'Unknown error' })); throw new Error(err.detail || 'Failed'); }
                 const data = await response.json();
@@ -2075,7 +2089,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 const response = await fetch('/api/create-genre-archaeology', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ genre: gaSelectedGenre, dig_depth: digDepth, refresh_frequency: refreshFrequency, playlist_length: playlistLength, library_ids: selectedLibraryIds })
+                    body: JSON.stringify({ genre: gaSelectedGenre, dig_depth: digDepth, refresh_frequency: refreshFrequency, playlist_length: playlistLength, library_ids: selectedLibraryIds, discovery_ratio: parseFloat(document.getElementById('ga-discovery-ratio').value) / 100 })
                 });
                 if (!response.ok) { const err = await response.json().catch(() => ({ detail: 'Unknown error' })); throw new Error(err.detail || 'Failed'); }
                 const data = await response.json();
