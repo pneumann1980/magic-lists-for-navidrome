@@ -58,8 +58,9 @@ def score_tracks_by_user_engagement(tracks: List[Dict], library_stats: Dict) -> 
             score += normalized_plays
             track_breakdown['play_score'] = normalized_plays
         
-        # Loved/hearted tracks (high value binary signal)
-        if track.get('loved', False) or track.get('favorited', False):
+        # Loved/hearted tracks (high value binary signal).
+        # Navidrome returns this as 'local_library_likes' (from starred), 'loved', or 'favorited'.
+        if track.get('loved', False) or track.get('favorited', False) or track.get('local_library_likes', False):
             score += 50
             engagement_stats['loved_tracks'] += 1
             track_breakdown['loved_bonus'] = 50
@@ -318,6 +319,12 @@ def build_tiered_pool(
     # ------------------------------------------------------------------
     # 2. Classify tracks into tiers.
     # ------------------------------------------------------------------
+    # Recompute max_play_count from the actual source tracks so we aren't
+    # stuck with get_library_stats()'s rough estimate when it returns 0.
+    actual_max = max((t.get('play_count', 0) for t in source_tracks), default=0)
+    if actual_max > 0:
+        library_stats = {**library_stats, 'max_play_count': actual_max}
+
     play_counts = sorted(t.get('play_count', 0) for t in source_tracks)
     median_idx = len(play_counts) // 2
     median_pc = play_counts[median_idx] if play_counts else 0

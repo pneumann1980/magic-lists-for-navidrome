@@ -341,7 +341,10 @@ class NavidromeClient:
                             "artist": artist_name,  # Include artist name for AI processing
                             "album": album_name,
                             "year": album_year,
-                            "play_count": song.get("playCount", 0)
+                            "play_count": song.get("playCount", 0),
+                            "local_library_likes": song.get("starred") is not None,
+                            "rating": song.get("userRating", 0),
+                            "last_played": song.get("played"),
                         })
             
             return tracks_list
@@ -424,6 +427,8 @@ class NavidromeClient:
                         "genre": song.get("genre"),
                         "play_count": song.get("playCount", 0),
                         "local_library_likes": song.get("starred") is not None,
+                        "rating": song.get("userRating", 0),
+                        "last_played": song.get("played"),
                         "duration": song.get("duration"),
                         "track_number": song.get("track")
                     }
@@ -504,6 +509,8 @@ class NavidromeClient:
                         "genre": song.get("genre"),
                         "play_count": song.get("playCount", 0),
                         "local_library_likes": song.get("starred") is not None,
+                        "rating": song.get("userRating", 0),
+                        "last_played": song.get("played"),
                         "duration": song.get("duration"),
                         "track_number": song.get("track")
                     }
@@ -1229,6 +1236,8 @@ class NavidromeClient:
                             "genre": song.get("genre"),
                             "play_count": song.get("playCount", 0),
                             "local_library_likes": song.get("starred") is not None,
+                            "rating": song.get("userRating", 0),
+                            "last_played": song.get("played"),
                             "duration": song.get("duration"),
                         })
 
@@ -1300,6 +1309,8 @@ class NavidromeClient:
                         "genre": song.get("genre"),
                         "play_count": song.get("playCount", 0),
                         "local_library_likes": song.get("starred") is not None,
+                        "rating": song.get("userRating", 0),
+                        "last_played": song.get("played"),
                         "duration": song.get("duration"),
                     })
 
