@@ -654,7 +654,12 @@ async def create_multi_artist_radio(
         if not curated_track_ids:
             raise HTTPException(status_code=500, detail="AI curation failed to return any tracks")
 
-        playlist_name = request.playlist_name or f"Radio: {' & '.join(artist_names)}"
+        if request.playlist_name:
+            playlist_name = request.playlist_name
+        elif len(artist_names) <= 2:
+            playlist_name = f"Radio: {' & '.join(artist_names)}"
+        else:
+            playlist_name = f"Radio: {artist_names[0]} & {artist_names[1]} +{len(artist_names) - 2}"
         navidrome_playlist_id = await nav_client.create_playlist(name=playlist_name, track_ids=curated_track_ids, comment=reasoning or None)
 
         track_id_to_title = {t["id"]: t["title"] for t in all_tracks}
@@ -723,7 +728,12 @@ async def create_multi_genre_mix(
         if not curated_track_ids:
             raise HTTPException(status_code=500, detail="AI curation failed to return any tracks")
 
-        playlist_name = request.playlist_name or f"Genre Mix: {' & '.join(request.genres)}"
+        if request.playlist_name:
+            playlist_name = request.playlist_name
+        elif len(request.genres) <= 2:
+            playlist_name = f"Genre Mix: {' & '.join(request.genres)}"
+        else:
+            playlist_name = f"Genre Mix: {request.genres[0]} & {request.genres[1]} +{len(request.genres) - 2}"
         navidrome_playlist_id = await nav_client.create_playlist(name=playlist_name, track_ids=curated_track_ids, comment=reasoning or None)
 
         track_id_to_title = {t["id"]: t["title"] for t in all_tracks}
@@ -2295,7 +2305,7 @@ async def refresh_playlist_now(playlist_id: int, db: DatabaseManager = Depends(g
 
 @app.patch("/api/playlists/{playlist_id}/settings")
 async def update_playlist_settings(playlist_id: int, request: UpdatePlaylistSettingsRequest, db: DatabaseManager = Depends(get_db)):
-    """Update playlist refresh frequency settings"""
+    """Update playlist refresh frequency, playlist length, and discovery ratio settings"""
     try:
         if request.refresh_frequency not in ["none", "daily", "weekly", "monthly"]:
             raise HTTPException(status_code=400, detail="Invalid refresh_frequency. Must be one of: none, daily, weekly, monthly")
@@ -2307,6 +2317,14 @@ async def update_playlist_settings(playlist_id: int, request: UpdatePlaylistSett
         navidrome_playlist_id = playlist.get("navidrome_playlist_id")
         if not navidrome_playlist_id:
             raise HTTPException(status_code=400, detail="Playlist has no Navidrome ID")
+
+        # Update playlist_length and discovery_ratio on the playlist row when provided
+        if request.playlist_length is not None or request.discovery_ratio is not None:
+            await db.update_playlist_extra_settings(
+                playlist_id=playlist_id,
+                playlist_length=request.playlist_length,
+                discovery_ratio=request.discovery_ratio,
+            )
 
         if request.refresh_frequency == "none":
             # Remove the scheduled refresh entirely

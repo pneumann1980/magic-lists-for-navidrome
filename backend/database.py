@@ -304,27 +304,29 @@ class DatabaseManager:
     async def get_playlist_by_id_with_schedule_info(self, playlist_id: int) -> Optional[Dict]:
         """Get a specific playlist with its scheduling information"""
         await self.init_db()
-        
+
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute("""
-                SELECT 
-                    p.id, 
-                    p.artist_id, 
-                    p.playlist_name, 
-                    p.songs, 
+                SELECT
+                    p.id,
+                    p.artist_id,
+                    p.playlist_name,
+                    p.songs,
                     p.reasoning,
-                    p.created_at, 
+                    p.created_at,
                     p.updated_at,
                     p.navidrome_playlist_id,
                     sp.refresh_frequency,
                     sp.next_refresh,
-                    sp.playlist_type
+                    sp.playlist_type,
+                    p.playlist_length,
+                    p.discovery_ratio
                 FROM playlists p
                 LEFT JOIN scheduled_playlists sp ON p.navidrome_playlist_id = sp.navidrome_playlist_id
                 WHERE p.id = ?
             """, (playlist_id,)) as cursor:
                 row = await cursor.fetchone()
-                
+
                 if row:
                     return {
                         "id": row[0],
@@ -337,9 +339,11 @@ class DatabaseManager:
                         "navidrome_playlist_id": row[7],
                         "refresh_frequency": row[8],
                         "next_refresh": row[9],
-                        "playlist_type": row[10]
+                        "playlist_type": row[10],
+                        "playlist_length": row[11],
+                        "discovery_ratio": row[12] if row[12] is not None else 0.25,
                     }
-        
+
         return None
     
     async def delete_playlist(self, playlist_id: int) -> bool:
@@ -498,6 +502,32 @@ class DatabaseManager:
             await db.commit()
             return cursor.rowcount > 0
     
+    async def update_playlist_extra_settings(self, playlist_id: int, playlist_length: Optional[int] = None, discovery_ratio: Optional[float] = None) -> bool:
+        """Update playlist_length and/or discovery_ratio for a given playlist"""
+        await self.init_db()
+
+        fields = []
+        params = []
+        if playlist_length is not None:
+            fields.append("playlist_length = ?")
+            params.append(playlist_length)
+        if discovery_ratio is not None:
+            fields.append("discovery_ratio = ?")
+            params.append(discovery_ratio)
+        if not fields:
+            return True  # Nothing to update
+
+        fields.append("updated_at = CURRENT_TIMESTAMP")
+        params.append(playlist_id)
+
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                f"UPDATE playlists SET {', '.join(fields)} WHERE id = ?",
+                params
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
     async def get_config(self, key: str) -> Optional[str]:
         """Get a configuration value by key"""
         await self.init_db()

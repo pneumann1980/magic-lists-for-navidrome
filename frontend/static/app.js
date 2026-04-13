@@ -1181,9 +1181,35 @@ function renderPlaylists(playlists) {
                     </div>
                 </div>
                 <!-- Inline modify panel (hidden by default) -->
-                <div id="modify-panel-${playlist.id}" class="hidden border-t border-gray-100 bg-gray-50 px-4 py-3">
-                    <p class="text-sm font-medium text-gray-700 mb-2">Refresh frequency</p>
-                    <div class="flex flex-wrap items-center gap-2">
+                <div id="modify-panel-${playlist.id}" class="hidden border-t border-gray-100 bg-gray-50 px-4 py-3 space-y-3">
+                    <!-- Playlist length -->
+                    <div>
+                        <p class="text-sm font-medium text-gray-700 mb-1">Playlist length</p>
+                        <div class="flex flex-wrap gap-2">
+                            ${[25, 30, 50, 100].map(n => `
+                            <label class="flex items-center gap-1 cursor-pointer">
+                                <input type="radio" name="pl-length-${playlist.id}" value="${n}" ${(playlist.playlist_length || 25) == n ? 'checked' : ''} class="accent-indigo-600">
+                                <span class="text-sm text-gray-700">${n}</span>
+                            </label>`).join('')}
+                        </div>
+                    </div>
+                    <!-- Discovery ratio (only for types with user-configurable discovery) -->
+                    ${['genre_mix','multi_genre_mix','decade_discovery','sonic_journey','genre_archaeology'].includes(playlist.playlist_type) ? `
+                    <div>
+                        <p class="text-sm font-medium text-gray-700 mb-1">Discovery Mode — <span id="modify-dr-label-${playlist.id}" class="text-indigo-600 font-normal"></span></p>
+                        <input type="range" id="modify-dr-${playlist.id}"
+                               min="0" max="75" step="5"
+                               value="${Math.round((playlist.discovery_ratio || 0.25) * 100)}"
+                               class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
+                               oninput="updateDiscoveryLabel('modify-dr-label-${playlist.id}', this.value)">
+                        <div class="flex justify-between text-xs text-gray-400 mt-1">
+                            <span>Familiar favourites</span>
+                            <span>Deeper cuts &amp; discoveries</span>
+                        </div>
+                    </div>` : ''}
+                    <!-- Refresh frequency -->
+                    <div>
+                        <p class="text-sm font-medium text-gray-700 mb-1">Refresh frequency</p>
                         <select
                             id="freq-select-${playlist.id}"
                             class="text-sm border border-gray-200 rounded-lg px-3 py-2 bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
@@ -1193,6 +1219,9 @@ function renderPlaylists(playlists) {
                             <option value="weekly" ${playlist.refresh_frequency === 'weekly' ? 'selected' : ''}>Weekly</option>
                             <option value="monthly" ${playlist.refresh_frequency === 'monthly' ? 'selected' : ''}>Monthly</option>
                         </select>
+                    </div>
+                    <!-- Actions -->
+                    <div class="flex items-center gap-2">
                         <button
                             onclick="savePlaylistSettings(${playlist.id})"
                             class="text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white rounded-lg px-4 py-2 cursor-pointer border-0"
@@ -1216,6 +1245,13 @@ function toggleModifyPanel(playlistId) {
     const panel = document.getElementById(`modify-panel-${playlistId}`);
     if (panel) {
         panel.classList.toggle('hidden');
+        // Initialize discovery label when panel becomes visible
+        if (!panel.classList.contains('hidden')) {
+            const drSlider = document.getElementById(`modify-dr-${playlistId}`);
+            if (drSlider) {
+                updateDiscoveryLabel(`modify-dr-label-${playlistId}`, drSlider.value);
+            }
+        }
     }
 }
 
@@ -1225,11 +1261,23 @@ async function savePlaylistSettings(playlistId) {
 
     const newFrequency = select.value;
 
+    // Playlist length (radio buttons)
+    const checkedLength = document.querySelector(`input[name="pl-length-${playlistId}"]:checked`);
+    const newLength = checkedLength ? parseInt(checkedLength.value) : null;
+
+    // Discovery ratio slider (only present for applicable playlist types)
+    const drSlider = document.getElementById(`modify-dr-${playlistId}`);
+    const newDiscoveryRatio = drSlider ? parseFloat(drSlider.value) / 100 : null;
+
+    const payload = { refresh_frequency: newFrequency };
+    if (newLength !== null) payload.playlist_length = newLength;
+    if (newDiscoveryRatio !== null) payload.discovery_ratio = newDiscoveryRatio;
+
     try {
         const response = await fetch(`/api/playlists/${playlistId}/settings`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ refresh_frequency: newFrequency })
+            body: JSON.stringify(payload)
         });
 
         if (!response.ok) {

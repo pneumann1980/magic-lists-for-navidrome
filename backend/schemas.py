@@ -112,6 +112,8 @@ class PlaylistWithScheduleInfo(BaseModel):
 class UpdatePlaylistSettingsRequest(BaseModel):
     """Request schema for updating playlist refresh settings"""
     refresh_frequency: str  # "none", "daily", "weekly", "monthly"
+    playlist_length: Optional[int] = None  # Number of tracks; None = no change
+    discovery_ratio: Optional[float] = None  # 0.0–0.75; None = no change
 
 class CreateMultiArtistRadioRequest(BaseModel):
     """Request schema for creating a Multi-Artist Radio Blend playlist"""
