@@ -349,36 +349,25 @@ async def create_playlist(
         else:
             scheduler_logger.info(f"⚠️ No AI reasoning provided for {', '.join(artist_names)}")
 
-        # Create playlist in Navidrome with AI reasoning as comment
+        # Get track titles for database storage - PRESERVE AI CURATION ORDER
+        track_id_to_title = {track["id"]: track["title"] for track in all_tracks}
+        track_titles = [track_id_to_title[tid] for tid in curated_track_ids if tid in track_id_to_title]
+
         comment_to_use = reasoning if reasoning else None
         comment_preview = comment_to_use[:200] + "..." if comment_to_use and len(comment_to_use) > 200 else comment_to_use
         scheduler_logger.info(f"💬 Creating playlist with comment (length: {len(comment_to_use) if comment_to_use else 0}): {comment_preview}")
 
-        navidrome_playlist_id = await nav_client.create_playlist(
-            name=playlist_name,
-            track_ids=curated_track_ids,
-            comment=comment_to_use
-        )
-        
-        # Get track titles for database storage - PRESERVE AI CURATION ORDER
-        # Note: Use all_tracks for mapping since AI might reference tracks from full set
-        track_titles = []
-        track_id_to_title = {track["id"]: track["title"] for track in all_tracks}
-        for track_id in curated_track_ids:  # Iterate in AI-curated order
-            if track_id in track_id_to_title:
-                track_titles.append(track_id_to_title[track_id])
-        
-        
-        # Store playlist in local database (using the first artist_id for now)
-        playlist = await db.create_playlist(
-            artist_id=request.artist_ids[0],
+        navidrome_playlist_id, playlist = await _atomic_create_playlist(
+            nav_client, db,
             playlist_name=playlist_name,
+            track_ids=curated_track_ids,
+            comment=comment_to_use,
+            artist_id=request.artist_ids[0],
             songs=track_titles,
             reasoning=reasoning,
-            navidrome_playlist_id=navidrome_playlist_id,
             playlist_length=request.playlist_length,
             library_ids=request.library_ids,
-            discovery_ratio=THIS_IS_DISCOVERY_RATIO
+            discovery_ratio=THIS_IS_DISCOVERY_RATIO,
         )
 
         # Handle scheduling if not "none" or "never"
@@ -553,34 +542,24 @@ async def create_genre_playlist(
             scheduler_logger.info(f"⚠️ No AI reasoning provided for {request.genre}")
 
         # Create playlist in Navidrome with AI reasoning as comment
+        track_id_to_title = {track["id"]: track["title"] for track in all_tracks}
+        track_titles = [track_id_to_title[tid] for tid in curated_track_ids if tid in track_id_to_title]
+
         comment_to_use = reasoning if reasoning else None
         comment_preview = comment_to_use[:200] + "..." if comment_to_use and len(comment_to_use) > 200 else comment_to_use
         scheduler_logger.info(f"💬 Creating playlist with comment (length: {len(comment_to_use) if comment_to_use else 0}): {comment_preview}")
 
-        navidrome_playlist_id = await nav_client.create_playlist(
-            name=playlist_name,
-            track_ids=curated_track_ids,
-            comment=comment_to_use
-        )
-
-        # Get track titles for database storage
-        track_titles = []
-        track_id_to_title = {track["id"]: track["title"] for track in all_tracks}
-        for track_id in curated_track_ids:  # Iterate in AI-curated order
-            if track_id in track_id_to_title:
-                track_titles.append(track_id_to_title[track_id])
-
-
-        # Store playlist in local database (using genre as identifier)
-        playlist = await db.create_playlist(
-            artist_id=request.genre,  # Using genre as artist_id for now
+        navidrome_playlist_id, playlist = await _atomic_create_playlist(
+            nav_client, db,
             playlist_name=playlist_name,
+            track_ids=curated_track_ids,
+            comment=comment_to_use,
+            artist_id=request.genre,
             songs=track_titles,
             reasoning=reasoning,
-            navidrome_playlist_id=navidrome_playlist_id,
             playlist_length=request.playlist_length,
             library_ids=request.library_ids,
-            discovery_ratio=request.discovery_ratio
+            discovery_ratio=request.discovery_ratio,
         )
 
         # Handle scheduling if not "none" or "never"
@@ -659,22 +638,23 @@ async def create_multi_artist_radio(
         elif len(artist_names) <= 2:
             playlist_name = f"Radio: {' & '.join(artist_names)}"
         else:
-            playlist_name = f"Radio: {artist_names[0]} & {artist_names[1]} +{len(artist_names) - 2}"
-        navidrome_playlist_id = await nav_client.create_playlist(name=playlist_name, track_ids=curated_track_ids, comment=reasoning or None)
+            playlist_name = f"Radio: {artist_names[0]} & {artist_names[1]} & {len(artist_names) - 2} more"
 
         track_id_to_title = {t["id"]: t["title"] for t in all_tracks}
         track_titles = [track_id_to_title[tid] for tid in curated_track_ids if tid in track_id_to_title]
 
         artist_id_value = _json.dumps({"artist_ids": request.artist_ids, "artist_names": artist_names})
-        playlist = await db.create_playlist(
-            artist_id=artist_id_value,
+        navidrome_playlist_id, playlist = await _atomic_create_playlist(
+            nav_client, db,
             playlist_name=playlist_name,
+            track_ids=curated_track_ids,
+            comment=reasoning or None,
+            artist_id=artist_id_value,
             songs=track_titles,
             reasoning=reasoning,
-            navidrome_playlist_id=navidrome_playlist_id,
             playlist_length=request.playlist_length,
             library_ids=request.library_ids,
-            discovery_ratio=MAR_DISCOVERY_RATIO
+            discovery_ratio=MAR_DISCOVERY_RATIO,
         )
 
         if request.refresh_frequency not in ["none", "never"]:
@@ -733,22 +713,23 @@ async def create_multi_genre_mix(
         elif len(request.genres) <= 2:
             playlist_name = f"Genre Mix: {' & '.join(request.genres)}"
         else:
-            playlist_name = f"Genre Mix: {request.genres[0]} & {request.genres[1]} +{len(request.genres) - 2}"
-        navidrome_playlist_id = await nav_client.create_playlist(name=playlist_name, track_ids=curated_track_ids, comment=reasoning or None)
+            playlist_name = f"Genre Mix: {request.genres[0]} & {request.genres[1]} & {len(request.genres) - 2} more"
 
         track_id_to_title = {t["id"]: t["title"] for t in all_tracks}
         track_titles = [track_id_to_title[tid] for tid in curated_track_ids if tid in track_id_to_title]
 
         artist_id_value = _json.dumps({"genres": request.genres})
-        playlist = await db.create_playlist(
-            artist_id=artist_id_value,
+        navidrome_playlist_id, playlist = await _atomic_create_playlist(
+            nav_client, db,
             playlist_name=playlist_name,
+            track_ids=curated_track_ids,
+            comment=reasoning or None,
+            artist_id=artist_id_value,
             songs=track_titles,
             reasoning=reasoning,
-            navidrome_playlist_id=navidrome_playlist_id,
             playlist_length=request.playlist_length,
             library_ids=request.library_ids,
-            discovery_ratio=request.discovery_ratio
+            discovery_ratio=request.discovery_ratio,
         )
 
         if request.refresh_frequency not in ["none", "never"]:
@@ -828,21 +809,22 @@ async def create_decade_discovery(
 
         decade_label = " & ".join(request.decades)
         playlist_name = request.playlist_name or f"Decade: {decade_label} ({request.mode})"
-        navidrome_playlist_id = await nav_client.create_playlist(name=playlist_name, track_ids=curated_track_ids, comment=reasoning or None)
 
         track_id_to_title = {t["id"]: t["title"] for t in all_tracks}
         track_titles = [track_id_to_title[tid] for tid in curated_track_ids if tid in track_id_to_title]
 
         artist_id_value = _json.dumps({"decades": request.decades, "mode": request.mode})
-        playlist = await db.create_playlist(
-            artist_id=artist_id_value,
+        navidrome_playlist_id, playlist = await _atomic_create_playlist(
+            nav_client, db,
             playlist_name=playlist_name,
+            track_ids=curated_track_ids,
+            comment=reasoning or None,
+            artist_id=artist_id_value,
             songs=track_titles,
             reasoning=reasoning,
-            navidrome_playlist_id=navidrome_playlist_id,
             playlist_length=request.playlist_length,
             library_ids=request.library_ids,
-            discovery_ratio=request.discovery_ratio
+            discovery_ratio=request.discovery_ratio,
         )
 
         if request.refresh_frequency not in ["none", "never"]:
@@ -908,7 +890,6 @@ async def create_sonic_journey(
             raise HTTPException(status_code=500, detail="AI curation failed to return any tracks")
 
         playlist_name = request.playlist_name or f"Journey: {start_artist_name} → {end_artist_name}"
-        navidrome_playlist_id = await nav_client.create_playlist(name=playlist_name, track_ids=curated_track_ids, comment=reasoning or None)
 
         track_id_to_title = {t["id"]: t["title"] for t in all_tracks}
         track_titles = [track_id_to_title[tid] for tid in curated_track_ids if tid in track_id_to_title]
@@ -919,15 +900,17 @@ async def create_sonic_journey(
             "end_artist_id": request.end_artist_id,
             "end_artist_name": end_artist_name
         })
-        playlist = await db.create_playlist(
-            artist_id=artist_id_value,
+        navidrome_playlist_id, playlist = await _atomic_create_playlist(
+            nav_client, db,
             playlist_name=playlist_name,
+            track_ids=curated_track_ids,
+            comment=reasoning or None,
+            artist_id=artist_id_value,
             songs=track_titles,
             reasoning=reasoning,
-            navidrome_playlist_id=navidrome_playlist_id,
             playlist_length=request.playlist_length,
             library_ids=request.library_ids,
-            discovery_ratio=request.discovery_ratio
+            discovery_ratio=request.discovery_ratio,
         )
 
         if request.refresh_frequency not in ["none", "never"]:
@@ -987,21 +970,22 @@ async def create_genre_archaeology(
             raise HTTPException(status_code=500, detail="AI curation failed to return any tracks")
 
         playlist_name = request.playlist_name or f"Archaeology: {request.genre} ({request.dig_depth})"
-        navidrome_playlist_id = await nav_client.create_playlist(name=playlist_name, track_ids=curated_track_ids, comment=reasoning or None)
 
         track_id_to_title = {t["id"]: t["title"] for t in all_tracks}
         track_titles = [track_id_to_title[tid] for tid in curated_track_ids if tid in track_id_to_title]
 
         artist_id_value = _json.dumps({"genre": request.genre, "dig_depth": request.dig_depth})
-        playlist = await db.create_playlist(
-            artist_id=artist_id_value,
+        navidrome_playlist_id, playlist = await _atomic_create_playlist(
+            nav_client, db,
             playlist_name=playlist_name,
+            track_ids=curated_track_ids,
+            comment=reasoning or None,
+            artist_id=artist_id_value,
             songs=track_titles,
             reasoning=reasoning,
-            navidrome_playlist_id=navidrome_playlist_id,
             playlist_length=request.playlist_length,
             library_ids=request.library_ids,
-            discovery_ratio=request.discovery_ratio
+            discovery_ratio=request.discovery_ratio,
         )
 
         if request.refresh_frequency not in ["none", "never"]:
@@ -1373,6 +1357,54 @@ def _is_transient_fallback(reasoning: str) -> bool:
     )
 
 
+async def _atomic_create_playlist(
+    nav_client,
+    db: "DatabaseManager",
+    *,
+    playlist_name: str,
+    track_ids: list,
+    comment,
+    artist_id: str,
+    songs: list,
+    reasoning,
+    playlist_length: int,
+    library_ids: list,
+    discovery_ratio: float,
+):
+    """Create a playlist in Navidrome then in the local DB atomically.
+
+    If the DB insert fails after the Navidrome playlist has been created, the
+    Navidrome playlist is deleted to avoid orphaned entries.  Returns
+    (navidrome_playlist_id, db_playlist).
+    """
+    navidrome_playlist_id = await nav_client.create_playlist(
+        name=playlist_name, track_ids=track_ids, comment=comment
+    )
+    try:
+        playlist = await db.create_playlist(
+            artist_id=artist_id,
+            playlist_name=playlist_name,
+            songs=songs,
+            reasoning=reasoning,
+            navidrome_playlist_id=navidrome_playlist_id,
+            playlist_length=playlist_length,
+            library_ids=library_ids,
+            discovery_ratio=discovery_ratio,
+        )
+    except Exception:
+        try:
+            await nav_client.delete_playlist(navidrome_playlist_id)
+            scheduler_logger.warning(
+                f"🗑️ Cleaned up orphaned Navidrome playlist {navidrome_playlist_id} after DB write failure"
+            )
+        except Exception as cleanup_err:
+            scheduler_logger.error(
+                f"❌ Could not clean up Navidrome playlist {navidrome_playlist_id}: {cleanup_err}"
+            )
+        raise
+    return navidrome_playlist_id, playlist
+
+
 def schedule_playlist_refresh():
     """Schedule the playlist refresh job to run every 12 hours"""
     if not scheduler.get_job('playlist_refresh'):
@@ -1470,15 +1502,14 @@ async def refresh_rediscover_playlist(scheduled_playlist, db: DatabaseManager):
         nav_client = get_navidrome_client()
         
         # Get original playlist to find user's preferred length
-        playlists = await db.get_all_playlists_with_schedule_info()
-        original_playlist = next((p for p in playlists if p.get("navidrome_playlist_id") == scheduled_playlist.navidrome_playlist_id), None)
+        original_playlist = await db.get_playlist_by_navidrome_playlist_id(scheduled_playlist.navidrome_playlist_id)
         
         if not original_playlist:
             scheduler_logger.error(f"❌ Could not find original playlist data for {scheduled_playlist.navidrome_playlist_id}")
             return
         
         # Get original playlist length (MUST respect user's choice)
-        original_length = original_playlist.get("playlist_length", 20)
+        original_length = original_playlist.get("playlist_length", 25)
         scheduler_logger.info(f"🎯 Using original playlist length: {original_length}")
         
         # Get previous playlist songs for variety context
@@ -1590,8 +1621,7 @@ async def refresh_this_is_playlist(scheduled_playlist, db: DatabaseManager):
         ai_client_instance = get_ai_client()
         
         # Find the original playlist to get artist info
-        playlists = await db.get_all_playlists_with_schedule_info()
-        original_playlist = next((p for p in playlists if p.get("navidrome_playlist_id") == scheduled_playlist.navidrome_playlist_id), None)
+        original_playlist = await db.get_playlist_by_navidrome_playlist_id(scheduled_playlist.navidrome_playlist_id)
         
         if not original_playlist:
             scheduler_logger.error(f"❌ Could not find original playlist data for {scheduled_playlist.navidrome_playlist_id}")
@@ -1733,8 +1763,7 @@ async def refresh_genre_mix_playlist(scheduled_playlist, db: DatabaseManager):
         ai_client_instance = get_ai_client()
 
         # Find the original playlist — genre is stored in the artist_id field
-        playlists = await db.get_all_playlists_with_schedule_info()
-        original_playlist = next((p for p in playlists if p.get("navidrome_playlist_id") == scheduled_playlist.navidrome_playlist_id), None)
+        original_playlist = await db.get_playlist_by_navidrome_playlist_id(scheduled_playlist.navidrome_playlist_id)
 
         if not original_playlist:
             scheduler_logger.error(f"❌ Could not find original playlist data for {scheduled_playlist.navidrome_playlist_id}")
@@ -1856,8 +1885,7 @@ async def refresh_multi_artist_radio_playlist(scheduled_playlist, db: DatabaseMa
         nav_client = get_navidrome_client()
         ai_client_instance = get_ai_client()
 
-        playlists = await db.get_all_playlists_with_schedule_info()
-        original_playlist = next((p for p in playlists if p.get("navidrome_playlist_id") == scheduled_playlist.navidrome_playlist_id), None)
+        original_playlist = await db.get_playlist_by_navidrome_playlist_id(scheduled_playlist.navidrome_playlist_id)
         if not original_playlist:
             scheduler_logger.error(f"❌ Could not find original playlist data for {scheduled_playlist.navidrome_playlist_id}")
             return
@@ -1931,8 +1959,7 @@ async def refresh_multi_genre_mix_playlist(scheduled_playlist, db: DatabaseManag
         nav_client = get_navidrome_client()
         ai_client_instance = get_ai_client()
 
-        playlists = await db.get_all_playlists_with_schedule_info()
-        original_playlist = next((p for p in playlists if p.get("navidrome_playlist_id") == scheduled_playlist.navidrome_playlist_id), None)
+        original_playlist = await db.get_playlist_by_navidrome_playlist_id(scheduled_playlist.navidrome_playlist_id)
         if not original_playlist:
             return
 
@@ -1994,8 +2021,7 @@ async def refresh_decade_discovery_playlist(scheduled_playlist, db: DatabaseMana
         nav_client = get_navidrome_client()
         ai_client_instance = get_ai_client()
 
-        playlists = await db.get_all_playlists_with_schedule_info()
-        original_playlist = next((p for p in playlists if p.get("navidrome_playlist_id") == scheduled_playlist.navidrome_playlist_id), None)
+        original_playlist = await db.get_playlist_by_navidrome_playlist_id(scheduled_playlist.navidrome_playlist_id)
         if not original_playlist:
             return
 
@@ -2065,8 +2091,7 @@ async def refresh_sonic_journey_playlist(scheduled_playlist, db: DatabaseManager
         nav_client = get_navidrome_client()
         ai_client_instance = get_ai_client()
 
-        playlists = await db.get_all_playlists_with_schedule_info()
-        original_playlist = next((p for p in playlists if p.get("navidrome_playlist_id") == scheduled_playlist.navidrome_playlist_id), None)
+        original_playlist = await db.get_playlist_by_navidrome_playlist_id(scheduled_playlist.navidrome_playlist_id)
         if not original_playlist:
             return
 
@@ -2131,8 +2156,7 @@ async def refresh_genre_archaeology_playlist(scheduled_playlist, db: DatabaseMan
         nav_client = get_navidrome_client()
         ai_client_instance = get_ai_client()
 
-        playlists = await db.get_all_playlists_with_schedule_info()
-        original_playlist = next((p for p in playlists if p.get("navidrome_playlist_id") == scheduled_playlist.navidrome_playlist_id), None)
+        original_playlist = await db.get_playlist_by_navidrome_playlist_id(scheduled_playlist.navidrome_playlist_id)
         if not original_playlist:
             return
 

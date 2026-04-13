@@ -83,18 +83,6 @@ class DatabaseManager:
                 )
             """)
             
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS scheduled_playlists (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    playlist_type TEXT NOT NULL,
-                    navidrome_playlist_id TEXT NOT NULL,
-                    refresh_frequency TEXT NOT NULL,
-                    next_refresh TIMESTAMP NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            
             # Create the app_config table for storing application configuration
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS app_config (
@@ -345,7 +333,51 @@ class DatabaseManager:
                     }
 
         return None
-    
+
+    async def get_playlist_by_navidrome_playlist_id(self, navidrome_playlist_id: str) -> Optional[Dict]:
+        """Get a playlist directly by its Navidrome playlist ID (used by refresh functions)"""
+        await self.init_db()
+
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute("""
+                SELECT
+                    p.id,
+                    p.artist_id,
+                    p.playlist_name,
+                    p.songs,
+                    p.reasoning,
+                    p.created_at,
+                    p.updated_at,
+                    p.navidrome_playlist_id,
+                    sp.refresh_frequency,
+                    sp.next_refresh,
+                    sp.playlist_type,
+                    p.playlist_length,
+                    p.discovery_ratio
+                FROM playlists p
+                LEFT JOIN scheduled_playlists sp ON p.navidrome_playlist_id = sp.navidrome_playlist_id
+                WHERE p.navidrome_playlist_id = ?
+                LIMIT 1
+            """, (navidrome_playlist_id,)) as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    return {
+                        "id": row[0],
+                        "artist_id": row[1],
+                        "playlist_name": row[2],
+                        "songs": json.loads(row[3]) if row[3] else [],
+                        "reasoning": row[4],
+                        "created_at": row[5],
+                        "updated_at": row[6],
+                        "navidrome_playlist_id": row[7],
+                        "refresh_frequency": row[8],
+                        "next_refresh": row[9],
+                        "playlist_type": row[10],
+                        "playlist_length": row[11],
+                        "discovery_ratio": row[12] if row[12] is not None else 0.25,
+                    }
+        return None
+
     async def delete_playlist(self, playlist_id: int) -> bool:
         """Delete a playlist from the database"""
         await self.init_db()
@@ -602,36 +634,32 @@ class DatabaseManager:
             await db.commit()
             return True
 
-    async def get_user_preference(self, user_id: str, key: str) -> Optional[str]:
-        """Get a user preference value"""
+    async def get_selected_library_id(self, user_id: str) -> Optional[str]:
+        """Get the user's selected library ID"""
         await self.init_db()
-
         async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute("""
-                SELECT value FROM user_preferences WHERE user_id = ? AND key = ?
-            """, (user_id, key)) as cursor:
+            async with db.execute(
+                "SELECT selected_library_id FROM user_preferences WHERE user_id = ? LIMIT 1",
+                (user_id,)
+            ) as cursor:
                 row = await cursor.fetchone()
                 return row[0] if row else None
 
-    async def set_user_preference(self, user_id: str, key: str, value: str) -> bool:
-        """Set a user preference value"""
-        await self.init_db()
-
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("""
-                INSERT OR REPLACE INTO user_preferences (user_id, key, value, updated_at)
-                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-            """, (user_id, key, value))
-            await db.commit()
-            return True
-
-    async def get_selected_library_id(self, user_id: str) -> Optional[str]:
-        """Get the user's selected library ID"""
-        return await self.get_user_preference(user_id, "selected_library_id")
-
     async def set_selected_library_id(self, user_id: str, library_id: str) -> bool:
         """Set the user's selected library ID"""
-        return await self.set_user_preference(user_id, "selected_library_id", library_id)
+        await self.init_db()
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "UPDATE user_preferences SET selected_library_id = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
+                (library_id, user_id)
+            )
+            if cursor.rowcount == 0:
+                await db.execute(
+                    "INSERT INTO user_preferences (user_id, selected_library_id) VALUES (?, ?)",
+                    (user_id, library_id)
+                )
+            await db.commit()
+            return True
 
     async def get_cache(self, cache_key: str) -> Optional[str]:
         """Get a cached value by key, checking expiration"""

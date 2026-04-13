@@ -123,6 +123,23 @@ function hideToast(toastId) {
     }
 }
 
+// Fetch wrapper with a 120-second timeout for long-running AI playlist creation requests.
+// Shows a clear error if the server takes too long rather than leaving the UI stuck.
+async function fetchWithTimeout(url, options, timeoutMs = 120000) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        return await fetch(url, { ...options, signal: controller.signal });
+    } catch (err) {
+        if (err.name === 'AbortError') {
+            throw new Error('Request timed out after 2 minutes. The AI service may be busy — please try again.');
+        }
+        throw err;
+    } finally {
+        clearTimeout(timeoutId);
+    }
+}
+
 // Mobile menu toggle functionality
 const mobileMenuBtn = document.getElementById('hs-navbar-alignment-collapse');
 const mobileSidebar = document.getElementById('mobileSidebar');
@@ -829,7 +846,7 @@ async function createArtistPlaylist() {
         const refreshFrequency = document.querySelector('input[name="artist-refresh-frequency"]:checked').value;
         const playlistLength = document.querySelector('input[name="artist-playlist-length"]:checked').value;
 
-        const response = await fetch('/api/create_playlist', {
+        const response = await fetchWithTimeout('/api/create_playlist', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -895,7 +912,7 @@ async function createGenrePlaylist() {
         const playlistLength = document.querySelector('input[name="genre-playlist-length"]:checked').value;
 
         const genreDiscoveryRatio = parseFloat(document.getElementById('genre-discovery-ratio').value) / 100;
-        const response = await fetch('/api/create_genre_playlist', {
+        const response = await fetchWithTimeout('/api/create_genre_playlist', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -959,7 +976,7 @@ async function generateRediscoverWeekly() {
         const refreshFrequency = document.querySelector('input[name="rediscover-refresh-frequency"]:checked').value;
         const playlistLength = document.querySelector('input[name="rediscover-playlist-length"]:checked').value;
 
-        const response = await fetch('/api/create-rediscover-playlist-v2', {
+        const response = await fetchWithTimeout('/api/create-rediscover-playlist-v2', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -1317,7 +1334,7 @@ async function savePlaylistSettings(playlistId) {
 
         // Hide the panel
         toggleModifyPanel(playlistId);
-        showToast('success', 'Refresh settings updated successfully');
+        showToast('success', 'Settings saved — playlist content updates on next refresh');
 
     } catch (error) {
         console.error('Error saving playlist settings:', error);
@@ -1338,10 +1355,10 @@ async function refreshPlaylistNow(playlistId, playlistName) {
     const toastId = showToast('loading', `Refreshing "${playlistName}"… This may take a minute.`, 0);
 
     try {
-        const response = await fetch(`/api/playlists/${playlistId}/refresh`, {
+        const response = await fetchWithTimeout(`/api/playlists/${playlistId}/refresh`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' }
-        });
+        }, 180000);
 
         if (!response.ok) {
             const err = await response.json().catch(() => ({ detail: 'Unknown error' }));
@@ -1870,7 +1887,7 @@ document.addEventListener('DOMContentLoaded', function() {
             try {
                 const refreshFrequency = document.querySelector('input[name="mar-refresh-frequency"]:checked').value;
                 const playlistLength = parseInt(document.querySelector('input[name="mar-playlist-length"]:checked').value);
-                const response = await fetch('/api/create-multi-artist-radio', {
+                const response = await fetchWithTimeout('/api/create-multi-artist-radio', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ artist_ids: marSelectedArtists.map(a => a.id), refresh_frequency: refreshFrequency, playlist_length: playlistLength, library_ids: selectedLibraryIds })
@@ -1946,7 +1963,7 @@ document.addEventListener('DOMContentLoaded', function() {
             try {
                 const refreshFrequency = document.querySelector('input[name="mgm-refresh-frequency"]:checked').value;
                 const playlistLength = parseInt(document.querySelector('input[name="mgm-playlist-length"]:checked').value);
-                const response = await fetch('/api/create-multi-genre-mix', {
+                const response = await fetchWithTimeout('/api/create-multi-genre-mix', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ genres: mgmSelectedGenres, refresh_frequency: refreshFrequency, playlist_length: playlistLength, library_ids: selectedLibraryIds, discovery_ratio: parseFloat(document.getElementById('mgm-discovery-ratio').value) / 100 })
@@ -1997,6 +2014,20 @@ function toggleDDDecade(decade, chipEl) {
 }
 
 document.addEventListener('DOMContentLoaded', function() {
+    // Dim the Discovery Mode slider for Decade & Discovery when "Discovery" mode is
+    // selected, because that mode bypasses the tiered pool entirely.
+    function updateDDSliderVisibility(mode) {
+        const wrapper = document.getElementById('dd-discovery-ratio')?.parentElement;
+        if (!wrapper) return;
+        const bypassed = mode === 'Discovery';
+        wrapper.style.opacity = bypassed ? '0.35' : '';
+        wrapper.style.pointerEvents = bypassed ? 'none' : '';
+        wrapper.title = bypassed ? 'Discovery mode sends all era tracks to AI — this slider has no effect' : '';
+    }
+    document.querySelectorAll('input[name="dd-mode"]').forEach(r => {
+        r.addEventListener('change', () => updateDDSliderVisibility(r.value));
+    });
+
     const ddForm = document.getElementById('decade-discovery-form');
     if (ddForm) {
         ddForm.addEventListener('submit', async function(e) {
@@ -2010,7 +2041,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 const mode = document.querySelector('input[name="dd-mode"]:checked').value;
                 const refreshFrequency = document.querySelector('input[name="dd-refresh-frequency"]:checked').value;
                 const playlistLength = parseInt(document.querySelector('input[name="dd-playlist-length"]:checked').value);
-                const response = await fetch('/api/create-decade-discovery', {
+                const response = await fetchWithTimeout('/api/create-decade-discovery', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ decades: ddSelectedDecades, mode: mode, refresh_frequency: refreshFrequency, playlist_length: playlistLength, library_ids: selectedLibraryIds, discovery_ratio: parseFloat(document.getElementById('dd-discovery-ratio').value) / 100 })
@@ -2075,7 +2106,7 @@ document.addEventListener('DOMContentLoaded', function() {
             try {
                 const refreshFrequency = document.querySelector('input[name="sj-refresh-frequency"]:checked').value;
                 const playlistLength = parseInt(document.querySelector('input[name="sj-playlist-length"]:checked').value);
-                const response = await fetch('/api/create-sonic-journey', {
+                const response = await fetchWithTimeout('/api/create-sonic-journey', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ start_artist_id: sjStartArtistId, end_artist_id: sjEndArtistId, refresh_frequency: refreshFrequency, playlist_length: playlistLength, library_ids: selectedLibraryIds, discovery_ratio: parseFloat(document.getElementById('sj-discovery-ratio').value) / 100 })
@@ -2121,6 +2152,20 @@ async function loadGenresForGA() {
 }
 
 document.addEventListener('DOMContentLoaded', function() {
+    // Dim the Discovery Mode slider for Genre Archaeology when "Deep" dig depth is
+    // selected, because that mode bypasses the tiered pool entirely.
+    function updateGASliderVisibility(depth) {
+        const wrapper = document.getElementById('ga-discovery-ratio')?.parentElement;
+        if (!wrapper) return;
+        const bypassed = depth === 'Deep';
+        wrapper.style.opacity = bypassed ? '0.35' : '';
+        wrapper.style.pointerEvents = bypassed ? 'none' : '';
+        wrapper.title = bypassed ? 'Deep dig sends all genre tracks to AI — this slider has no effect' : '';
+    }
+    document.querySelectorAll('input[name="ga-dig-depth"]').forEach(r => {
+        r.addEventListener('change', () => updateGASliderVisibility(r.value));
+    });
+
     const gaForm = document.getElementById('genre-archaeology-form');
     if (gaForm) {
         gaForm.addEventListener('submit', async function(e) {
@@ -2134,7 +2179,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 const digDepth = document.querySelector('input[name="ga-dig-depth"]:checked').value;
                 const refreshFrequency = document.querySelector('input[name="ga-refresh-frequency"]:checked').value;
                 const playlistLength = parseInt(document.querySelector('input[name="ga-playlist-length"]:checked').value);
-                const response = await fetch('/api/create-genre-archaeology', {
+                const response = await fetchWithTimeout('/api/create-genre-archaeology', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ genre: gaSelectedGenre, dig_depth: digDepth, refresh_frequency: refreshFrequency, playlist_length: playlistLength, library_ids: selectedLibraryIds, discovery_ratio: parseFloat(document.getElementById('ga-discovery-ratio').value) / 100 })
