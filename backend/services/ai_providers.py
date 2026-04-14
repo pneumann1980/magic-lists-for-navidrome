@@ -211,6 +211,13 @@ class AIProvider:
                     retry_delay *= 2
                     continue
                 raise Exception(f"Google AI error: HTTP {e.response.status_code} — {e.response.text[:200]}")
+            except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.TimeoutException) as e:
+                if attempt < max_retries - 1:
+                    print(f"🔄 Google AI timeout (attempt {attempt + 1}/{max_retries}), retrying in {retry_delay}s...")
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2
+                    continue
+                raise Exception(f"Google AI error: request timed out after {max_retries} attempts")
             except Exception as e:
                 raise Exception(f"Google AI error: {str(e)}")
 

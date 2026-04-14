@@ -1617,6 +1617,8 @@ async def refresh_rediscover_playlist(scheduled_playlist, db: DatabaseManager):
         else:
             scheduler_logger.warning(f"⚠️ No tracks generated for playlist {scheduled_playlist.navidrome_playlist_id}")
         
+    except AITemporarilyUnavailableError:
+        raise  # Propagate so callers can report it correctly
     except Exception as e:
         scheduler_logger.error(f"❌ Error refreshing playlist {scheduled_playlist.navidrome_playlist_id}: {e}")
 
@@ -1761,6 +1763,8 @@ async def refresh_this_is_playlist(scheduled_playlist, db: DatabaseManager):
         else:
             scheduler_logger.warning(f"⚠️ No tracks found for artist {artist_name} in playlist {scheduled_playlist.navidrome_playlist_id}")
         
+    except AITemporarilyUnavailableError:
+        raise
     except Exception as e:
         scheduler_logger.error(f"❌ Error refreshing This Is playlist {scheduled_playlist.navidrome_playlist_id}: {e}")
 
@@ -1887,6 +1891,8 @@ async def refresh_genre_mix_playlist(scheduled_playlist, db: DatabaseManager):
         else:
             scheduler_logger.warning(f"⚠️ No curated tracks generated for Genre Mix playlist {scheduled_playlist.navidrome_playlist_id}")
 
+    except AITemporarilyUnavailableError:
+        raise
     except Exception as e:
         scheduler_logger.error(f"❌ Error refreshing Genre Mix playlist {scheduled_playlist.navidrome_playlist_id}: {e}")
 
@@ -1963,6 +1969,8 @@ async def refresh_multi_artist_radio_playlist(scheduled_playlist, db: DatabaseMa
             await db.update_scheduled_playlist_next_refresh(scheduled_playlist.id, next_refresh)
             scheduler_logger.info(f"✅ Refreshed multi_artist_radio playlist {scheduled_playlist.navidrome_playlist_id}")
 
+    except AITemporarilyUnavailableError:
+        raise
     except Exception as e:
         scheduler_logger.error(f"❌ Error refreshing multi_artist_radio playlist {scheduled_playlist.navidrome_playlist_id}: {e}")
 
@@ -2027,6 +2035,8 @@ async def refresh_multi_genre_mix_playlist(scheduled_playlist, db: DatabaseManag
             await db.update_scheduled_playlist_next_refresh(scheduled_playlist.id, next_refresh)
             scheduler_logger.info(f"✅ Refreshed multi_genre_mix playlist {scheduled_playlist.navidrome_playlist_id}")
 
+    except AITemporarilyUnavailableError:
+        raise
     except Exception as e:
         scheduler_logger.error(f"❌ Error refreshing multi_genre_mix playlist {scheduled_playlist.navidrome_playlist_id}: {e}")
 
@@ -2099,6 +2109,8 @@ async def refresh_decade_discovery_playlist(scheduled_playlist, db: DatabaseMana
             await db.update_scheduled_playlist_next_refresh(scheduled_playlist.id, next_refresh)
             scheduler_logger.info(f"✅ Refreshed decade_discovery playlist {scheduled_playlist.navidrome_playlist_id}")
 
+    except AITemporarilyUnavailableError:
+        raise
     except Exception as e:
         scheduler_logger.error(f"❌ Error refreshing decade_discovery playlist {scheduled_playlist.navidrome_playlist_id}: {e}")
 
@@ -2166,6 +2178,8 @@ async def refresh_sonic_journey_playlist(scheduled_playlist, db: DatabaseManager
             await db.update_scheduled_playlist_next_refresh(scheduled_playlist.id, next_refresh)
             scheduler_logger.info(f"✅ Refreshed sonic_journey playlist {scheduled_playlist.navidrome_playlist_id}")
 
+    except AITemporarilyUnavailableError:
+        raise
     except Exception as e:
         scheduler_logger.error(f"❌ Error refreshing sonic_journey playlist {scheduled_playlist.navidrome_playlist_id}: {e}")
 
@@ -2237,6 +2251,8 @@ async def refresh_genre_archaeology_playlist(scheduled_playlist, db: DatabaseMan
             await db.update_scheduled_playlist_next_refresh(scheduled_playlist.id, next_refresh)
             scheduler_logger.info(f"✅ Refreshed genre_archaeology playlist {scheduled_playlist.navidrome_playlist_id}")
 
+    except AITemporarilyUnavailableError:
+        raise
     except Exception as e:
         scheduler_logger.error(f"❌ Error refreshing genre_archaeology playlist {scheduled_playlist.navidrome_playlist_id}: {e}")
 
