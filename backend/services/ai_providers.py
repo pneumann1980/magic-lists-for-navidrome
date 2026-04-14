@@ -205,12 +205,24 @@ class AIProvider:
                 response.raise_for_status()
                 break  # Success — exit retry loop
             except httpx.HTTPStatusError as e:
+                # Try to extract the API's own error message from the JSON body
+                try:
+                    api_error = e.response.json().get("error", {})
+                    api_message = api_error.get("message", "")
+                    error_desc = (
+                        f"HTTP {e.response.status_code}: {api_message}"
+                        if api_message
+                        else f"HTTP {e.response.status_code} — {e.response.text[:300]}"
+                    )
+                except Exception:
+                    error_desc = f"HTTP {e.response.status_code} — {e.response.text[:300]}"
+
                 if e.response.status_code in (500, 503) and attempt < max_retries - 1:
                     print(f"🔄 Google AI transient error {e.response.status_code} (attempt {attempt + 1}/{max_retries}), retrying in {retry_delay}s...")
                     await asyncio.sleep(retry_delay)
                     retry_delay *= 2
                     continue
-                raise Exception(f"Google AI error: HTTP {e.response.status_code} — {e.response.text[:200]}")
+                raise Exception(f"Google AI error: {error_desc}")
             except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.TimeoutException) as e:
                 if attempt < max_retries - 1:
                     print(f"🔄 Google AI timeout (attempt {attempt + 1}/{max_retries}), retrying in {retry_delay}s...")
