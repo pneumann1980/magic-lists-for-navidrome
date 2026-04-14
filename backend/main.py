@@ -1357,6 +1357,11 @@ def _is_transient_fallback(reasoning: str) -> bool:
     )
 
 
+class AITemporarilyUnavailableError(Exception):
+    """Raised by refresh functions when AI returned a transient error and the playlist was left unchanged."""
+    pass
+
+
 async def _atomic_create_playlist(
     nav_client,
     db: "DatabaseManager",
@@ -1486,6 +1491,8 @@ async def refresh_scheduled_playlists():
                     await refresh_genre_archaeology_playlist(scheduled_playlist, db)
                 else:
                     scheduler_logger.warning(f"⚠️ Unknown playlist type '{scheduled_playlist.playlist_type}' for {scheduled_playlist.navidrome_playlist_id} – skipping")
+            except AITemporarilyUnavailableError:
+                pass  # Already logged as warning above; retry has been scheduled
             except Exception as playlist_err:
                 scheduler_logger.error(f"❌ Failed to refresh playlist {scheduled_playlist.navidrome_playlist_id}: {playlist_err}")
                 # Continue with remaining playlists even if one fails
@@ -1568,7 +1575,9 @@ async def refresh_rediscover_playlist(scheduled_playlist, db: DatabaseManager):
                     f"⚠️ AI error on Re-Discover refresh — keeping existing playlist unchanged. "
                     f"Retry scheduled for {retry_at.strftime('%Y-%m-%d %H:%M:%S')}"
                 )
-                return
+                raise AITemporarilyUnavailableError(
+                    "The AI service is temporarily overloaded — your playlist is unchanged and a retry has been scheduled for 1 hour from now."
+                )
 
             # Log the AI reasoning for scheduled refresh (truncated)
             if ai_reasoning and ai_curated:
@@ -1700,7 +1709,9 @@ async def refresh_this_is_playlist(scheduled_playlist, db: DatabaseManager):
                     f"⚠️ AI error on This Is refresh — keeping existing playlist unchanged. "
                     f"Retry scheduled for {retry_at.strftime('%Y-%m-%d %H:%M:%S')}"
                 )
-                return
+                raise AITemporarilyUnavailableError(
+                    "The AI service is temporarily overloaded — your playlist is unchanged and a retry has been scheduled for 1 hour from now."
+                )
 
             if curated_track_ids:
                 # VALIDATE: Ensure we got the right number of tracks
@@ -1831,7 +1842,9 @@ async def refresh_genre_mix_playlist(scheduled_playlist, db: DatabaseManager):
                 f"⚠️ AI error on Genre Mix refresh — keeping existing playlist unchanged. "
                 f"Retry scheduled for {retry_at.strftime('%Y-%m-%d %H:%M:%S')}"
             )
-            return
+            raise AITemporarilyUnavailableError(
+                "The AI service is temporarily overloaded — your playlist is unchanged and a retry has been scheduled for 1 hour from now."
+            )
 
         if curated_track_ids:
             # Fill any gap if the final list is short
@@ -1937,7 +1950,9 @@ async def refresh_multi_artist_radio_playlist(scheduled_playlist, db: DatabaseMa
                 f"⚠️ AI error on Multi-Artist Radio refresh — keeping existing playlist unchanged. "
                 f"Retry scheduled for {retry_at.strftime('%Y-%m-%d %H:%M:%S')}"
             )
-            return
+            raise AITemporarilyUnavailableError(
+                "The AI service is temporarily overloaded — your playlist is unchanged and a retry has been scheduled for 1 hour from now."
+            )
 
         if curated_track_ids:
             await nav_client.update_playlist(playlist_id=scheduled_playlist.navidrome_playlist_id, track_ids=curated_track_ids, comment=reasoning or None)
@@ -1999,7 +2014,9 @@ async def refresh_multi_genre_mix_playlist(scheduled_playlist, db: DatabaseManag
                 f"⚠️ AI error on Multi-Genre Mix refresh — keeping existing playlist unchanged. "
                 f"Retry scheduled for {retry_at.strftime('%Y-%m-%d %H:%M:%S')}"
             )
-            return
+            raise AITemporarilyUnavailableError(
+                "The AI service is temporarily overloaded — your playlist is unchanged and a retry has been scheduled for 1 hour from now."
+            )
 
         if curated_track_ids:
             await nav_client.update_playlist(playlist_id=scheduled_playlist.navidrome_playlist_id, track_ids=curated_track_ids, comment=reasoning or None)
@@ -2069,7 +2086,9 @@ async def refresh_decade_discovery_playlist(scheduled_playlist, db: DatabaseMana
                 f"⚠️ AI error on Decade & Discovery refresh — keeping existing playlist unchanged. "
                 f"Retry scheduled for {retry_at.strftime('%Y-%m-%d %H:%M:%S')}"
             )
-            return
+            raise AITemporarilyUnavailableError(
+                "The AI service is temporarily overloaded — your playlist is unchanged and a retry has been scheduled for 1 hour from now."
+            )
 
         if curated_track_ids:
             await nav_client.update_playlist(playlist_id=scheduled_playlist.navidrome_playlist_id, track_ids=curated_track_ids, comment=reasoning or None)
@@ -2134,7 +2153,9 @@ async def refresh_sonic_journey_playlist(scheduled_playlist, db: DatabaseManager
                 f"⚠️ AI error on Sonic Journey refresh — keeping existing playlist unchanged. "
                 f"Retry scheduled for {retry_at.strftime('%Y-%m-%d %H:%M:%S')}"
             )
-            return
+            raise AITemporarilyUnavailableError(
+                "The AI service is temporarily overloaded — your playlist is unchanged and a retry has been scheduled for 1 hour from now."
+            )
 
         if curated_track_ids:
             await nav_client.update_playlist(playlist_id=scheduled_playlist.navidrome_playlist_id, track_ids=curated_track_ids, comment=reasoning or None)
@@ -2203,7 +2224,9 @@ async def refresh_genre_archaeology_playlist(scheduled_playlist, db: DatabaseMan
                 f"⚠️ AI error on Genre Archaeology refresh — keeping existing playlist unchanged. "
                 f"Retry scheduled for {retry_at.strftime('%Y-%m-%d %H:%M:%S')}"
             )
-            return
+            raise AITemporarilyUnavailableError(
+                "The AI service is temporarily overloaded — your playlist is unchanged and a retry has been scheduled for 1 hour from now."
+            )
 
         if curated_track_ids:
             await nav_client.update_playlist(playlist_id=scheduled_playlist.navidrome_playlist_id, track_ids=curated_track_ids, comment=reasoning or None)
@@ -2321,6 +2344,8 @@ async def refresh_playlist_now(playlist_id: int, db: DatabaseManager = Depends(g
 
         return {"message": "Playlist refreshed successfully"}
 
+    except AITemporarilyUnavailableError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:

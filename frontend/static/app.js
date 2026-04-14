@@ -68,6 +68,11 @@ function showToast(type, message, duration = 5000) {
         textClass = 'text-blue-800';
         borderClass = 'border';
         icon = '<svg class="size-4 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>';
+    } else if (type === 'warning') {
+        bgClass = 'bg-amber-50 border-amber-200';
+        textClass = 'text-amber-800';
+        borderClass = 'border';
+        icon = '<svg class="size-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>';
     } else {
         bgClass = 'bg-red-50 border-red-200';
         textClass = 'text-red-800';
@@ -1359,6 +1364,18 @@ async function refreshPlaylistNow(playlistId, playlistName) {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' }
         }, 180000);
+
+        if (response.status === 503) {
+            const err = await response.json().catch(() => ({}));
+            hideToast(toastId);
+            showToast('warning', err.detail || 'AI service temporarily unavailable — playlist unchanged, retry scheduled in 1 hour.');
+            if (btn) {
+                btn.disabled = false;
+                btn.textContent = originalText;
+                btn.classList.remove('opacity-60', 'cursor-not-allowed');
+            }
+            return;
+        }
 
         if (!response.ok) {
             const err = await response.json().catch(() => ({ detail: 'Unknown error' }));
