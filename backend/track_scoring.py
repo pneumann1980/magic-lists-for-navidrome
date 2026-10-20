@@ -5,6 +5,7 @@ Optimizes payload size for LLM compatibility and token cost efficiency by intell
 scoring and filtering source tracks based on user listening behavior.
 """
 
+import random
 from datetime import datetime
 from typing import List, Dict, Tuple, Any
 
@@ -57,8 +58,9 @@ def score_tracks_by_user_engagement(tracks: List[Dict], library_stats: Dict) -> 
             score += normalized_plays
             track_breakdown['play_score'] = normalized_plays
         
-        # Loved/hearted tracks (high value binary signal)
-        if track.get('loved', False) or track.get('favorited', False):
+        # Loved/hearted tracks (high value binary signal).
+        # Navidrome returns this as 'local_library_likes' (from starred), 'loved', or 'favorited'.
+        if track.get('loved', False) or track.get('favorited', False) or track.get('local_library_likes', False):
             score += 50
             engagement_stats['loved_tracks'] += 1
             track_breakdown['loved_bonus'] = 50
@@ -100,8 +102,13 @@ def score_tracks_by_user_engagement(tracks: List[Dict], library_stats: Dict) -> 
                 # Skip recency bonus if date parsing fails
                 pass
         
+        # Random jitter: ensures candidate pool varies between refreshes.
+        # Tracks with very high engagement scores still tend to be included,
+        # but marginal tracks rotate in/out, preventing stale repetition.
+        score += random.uniform(0, 45)
+
         scored_tracks.append((score, track))
-        
+
         # Update score statistics
         total_score += score
         engagement_stats['max_score'] = max(engagement_stats['max_score'], score)
@@ -259,3 +266,162 @@ def filter_tracks_for_this_is_playlist(
     }
     
     return filtered_tracks, filter_metadata
+
+
+def build_tiered_pool(
+    source_tracks: List[Dict],
+    pool_size: int,
+    discovery_ratio: float,
+    library_stats: Dict,
+) -> Tuple[List[Dict], Dict[str, Any]]:
+    """
+    Build a candidate pool that explicitly mixes familiar and undiscovered tracks.
+
+    Tiers (classified by play_count):
+      • Hits        (A): play_count > median  — well-loved favourites
+      • Familiar    (B): 3 ≤ play_count ≤ median — comfortable tracks
+      • Discovery   (C): play_count < 3        — barely heard tracks
+
+    ``discovery_ratio`` controls the share of Tier C in the pool.
+    The remaining share is split 55 / 45 between Hits and Familiar.
+
+    A per-artist cap of 10 % of pool_size prevents any single artist from
+    dominating the candidate pool regardless of how many tracks they have.
+
+    If a tier does not have enough tracks to fill its quota the shortfall is
+    redistributed proportionally from the other tiers.
+
+    Args:
+        source_tracks:   All available tracks for the current context.
+        pool_size:       Total number of candidates to return for the LLM.
+        discovery_ratio: Share of pool that should be discovery tracks (0.0–0.75).
+        library_stats:   Library statistics dict (used for engagement scoring).
+
+    Returns:
+        Tuple of (pool_tracks, metadata_dict).
+    """
+    import math as _math
+
+    if not source_tracks:
+        return [], {'tiered': False, 'reason': 'empty_source', 'source_count': 0, 'sent_count': 0}
+
+    # ------------------------------------------------------------------
+    # 1. Skip tiering when the source is too small to be worth splitting.
+    # ------------------------------------------------------------------
+    if len(source_tracks) <= pool_size:
+        return source_tracks, {
+            'tiered': False,
+            'reason': 'below_threshold',
+            'source_count': len(source_tracks),
+            'sent_count': len(source_tracks),
+        }
+
+    # ------------------------------------------------------------------
+    # 2. Classify tracks into tiers.
+    # ------------------------------------------------------------------
+    # Recompute max_play_count from the actual source tracks so we aren't
+    # stuck with get_library_stats()'s rough estimate when it returns 0.
+    actual_max = max((t.get('play_count', 0) for t in source_tracks), default=0)
+    if actual_max > 0:
+        library_stats = {**library_stats, 'max_play_count': actual_max}
+
+    play_counts = sorted(t.get('play_count', 0) for t in source_tracks)
+    median_idx = len(play_counts) // 2
+    median_pc = play_counts[median_idx] if play_counts else 0
+
+    tier_a: List[Dict] = []  # Hits
+    tier_b: List[Dict] = []  # Familiar
+    tier_c: List[Dict] = []  # Discovery
+
+    for track in source_tracks:
+        pc = track.get('play_count', 0)
+        if pc < 3:
+            tier_c.append(track)
+        elif pc > median_pc:
+            tier_a.append(track)
+        else:
+            tier_b.append(track)
+
+    # ------------------------------------------------------------------
+    # 3. Calculate per-tier quotas with overflow redistribution.
+    # ------------------------------------------------------------------
+    dr = max(0.0, min(0.75, discovery_ratio))
+    n_c_want = int(pool_size * dr)
+    n_a_want = int((pool_size - n_c_want) * 0.55)
+    n_b_want = pool_size - n_c_want - n_a_want
+
+    # Score tiers A and B by engagement (brings recency/liked signals in).
+    def _score_tier(tier: List[Dict]) -> List[Dict]:
+        scored = score_tracks_by_user_engagement(tier, library_stats)
+        return [t for _, t in scored]
+
+    tier_a_sorted = _score_tier(tier_a)
+    tier_b_sorted = _score_tier(tier_b)
+    random.shuffle(tier_c)  # Discovery tier: pure random, no popularity bias
+
+    # Redistribute overflow from undersupplied tiers.
+    n_c = min(n_c_want, len(tier_c))
+    n_a = min(n_a_want, len(tier_a_sorted))
+    n_b = min(n_b_want, len(tier_b_sorted))
+
+    shortfall = pool_size - (n_c + n_a + n_b)
+    if shortfall > 0:
+        # Fill from whichever tiers still have spare capacity.
+        extra_a = len(tier_a_sorted) - n_a
+        extra_b = len(tier_b_sorted) - n_b
+        extra_c = len(tier_c) - n_c
+        total_extra = extra_a + extra_b + extra_c
+        if total_extra > 0:
+            n_a += int(shortfall * extra_a / total_extra)
+            n_b += int(shortfall * extra_b / total_extra)
+            n_c += shortfall - (n_a - min(n_a_want, len(tier_a_sorted))) - (n_b - min(n_b_want, len(tier_b_sorted)))
+            n_a = min(n_a, len(tier_a_sorted))
+            n_b = min(n_b, len(tier_b_sorted))
+            n_c = min(n_c, len(tier_c))
+
+    # ------------------------------------------------------------------
+    # 4. Apply per-artist cap within each tier (max 10 % of pool_size).
+    # ------------------------------------------------------------------
+    max_per_artist = max(1, _math.ceil(pool_size * 0.10))
+
+    def _cap_artists(tracks: List[Dict], n: int) -> List[Dict]:
+        counts: Dict[str, int] = {}
+        result: List[Dict] = []
+        for t in tracks:
+            artist = t.get('artist') or 'Unknown'
+            if counts.get(artist, 0) < max_per_artist:
+                result.append(t)
+                counts[artist] = counts.get(artist, 0) + 1
+            if len(result) >= n:
+                break
+        return result
+
+    # Sample from a wider pool so the same top hits don't dominate every refresh
+    tier_a_pool = tier_a_sorted[:min(n_a * 3, len(tier_a_sorted))]
+    random.shuffle(tier_a_pool)
+    tier_b_pool = tier_b_sorted[:min(n_b * 2, len(tier_b_sorted))]
+    random.shuffle(tier_b_pool)
+
+    hits_sample      = _cap_artists(tier_a_pool, n_a)
+    familiar_sample  = _cap_artists(tier_b_pool, n_b)
+    discovery_sample = _cap_artists(tier_c,       n_c)
+
+    # ------------------------------------------------------------------
+    # 5. Merge and shuffle so tiers are interleaved in the LLM payload.
+    # ------------------------------------------------------------------
+    pool = hits_sample + familiar_sample + discovery_sample
+    random.shuffle(pool)
+
+    actual_discovery_pct = round(len(discovery_sample) / len(pool) * 100) if pool else 0
+
+    metadata = {
+        'tiered': True,
+        'source_count': len(source_tracks),
+        'sent_count': len(pool),
+        'discovery_ratio_requested': dr,
+        'discovery_count': len(discovery_sample),
+        'familiar_count': len(familiar_sample),
+        'hits_count': len(hits_sample),
+        'actual_discovery_pct': actual_discovery_pct,
+    }
+    return pool, metadata

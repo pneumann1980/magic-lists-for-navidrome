@@ -64,18 +64,19 @@ class DatabaseManager:
                 # Column already exists or other error - ignore
                 pass
 
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS scheduled_playlists (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    playlist_type TEXT NOT NULL,
-                    navidrome_playlist_id TEXT NOT NULL,
-                    refresh_frequency TEXT NOT NULL,
-                    next_refresh TIMESTAMP NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            
+            # Add discovery_ratio column if it doesn't exist (for tiered pool strategy)
+            try:
+                await db.execute("ALTER TABLE playlists ADD COLUMN discovery_ratio REAL DEFAULT 0.25")
+            except:
+                # Column already exists or other error - ignore
+                pass
+
+            # Add songs_history column for rolling refresh deduplication (last 4 snapshots)
+            try:
+                await db.execute("ALTER TABLE playlists ADD COLUMN songs_history TEXT DEFAULT '[]'")
+            except:
+                pass
+
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS scheduled_playlists (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -157,18 +158,18 @@ class DatabaseManager:
 
             await db.commit()
     
-    async def create_playlist(self, artist_id: str, playlist_name: str, songs: Optional[List[str]] = None, reasoning: Optional[str] = None, navidrome_playlist_id: Optional[str] = None, playlist_length: Optional[int] = None, library_ids: Optional[List[str]] = None) -> Optional[Playlist]:
+    async def create_playlist(self, artist_id: str, playlist_name: str, songs: Optional[List[str]] = None, reasoning: Optional[str] = None, navidrome_playlist_id: Optional[str] = None, playlist_length: Optional[int] = None, library_ids: Optional[List[str]] = None, discovery_ratio: Optional[float] = None) -> Optional[Playlist]:
         """Create a new playlist in the database"""
         await self.init_db()
-        
+
         songs_json = json.dumps(songs or [])
         library_ids_json = json.dumps(library_ids or [])
 
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute("""
-                INSERT INTO playlists (artist_id, playlist_name, songs, reasoning, navidrome_playlist_id, playlist_length, library_ids)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (artist_id, playlist_name, songs_json, reasoning, navidrome_playlist_id, playlist_length, library_ids_json))
+                INSERT INTO playlists (artist_id, playlist_name, songs, reasoning, navidrome_playlist_id, playlist_length, library_ids, discovery_ratio)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (artist_id, playlist_name, songs_json, reasoning, navidrome_playlist_id, playlist_length, library_ids_json, discovery_ratio))
             
             playlist_id = cursor.lastrowid
             await db.commit()
@@ -252,26 +253,27 @@ class DatabaseManager:
         playlists = []
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute("""
-                SELECT 
-                    p.id, 
-                    p.artist_id, 
-                    p.playlist_name, 
-                    p.songs, 
+                SELECT
+                    p.id,
+                    p.artist_id,
+                    p.playlist_name,
+                    p.songs,
                     p.reasoning,
                     p.navidrome_playlist_id,
-                    p.created_at, 
+                    p.created_at,
                     p.updated_at,
                     p.last_refreshed,
                     p.playlist_length,
                     sp.refresh_frequency,
                     sp.next_refresh,
-                    sp.playlist_type
+                    sp.playlist_type,
+                    p.discovery_ratio
                 FROM playlists p
                 LEFT JOIN scheduled_playlists sp ON p.navidrome_playlist_id = sp.navidrome_playlist_id
                 ORDER BY p.created_at DESC
             """) as cursor:
                 rows = await cursor.fetchall()
-                
+
                 for row in rows:
                     playlist_data = {
                         "id": row[0],
@@ -286,7 +288,8 @@ class DatabaseManager:
                         "playlist_length": row[9],
                         "refresh_frequency": row[10],
                         "next_refresh": row[11],
-                        "playlist_type": row[12]
+                        "playlist_type": row[12],
+                        "discovery_ratio": row[13] if row[13] is not None else 0.25,
                     }
                     playlists.append(playlist_data)
         
@@ -295,27 +298,30 @@ class DatabaseManager:
     async def get_playlist_by_id_with_schedule_info(self, playlist_id: int) -> Optional[Dict]:
         """Get a specific playlist with its scheduling information"""
         await self.init_db()
-        
+
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute("""
-                SELECT 
-                    p.id, 
-                    p.artist_id, 
-                    p.playlist_name, 
-                    p.songs, 
+                SELECT
+                    p.id,
+                    p.artist_id,
+                    p.playlist_name,
+                    p.songs,
                     p.reasoning,
-                    p.created_at, 
+                    p.created_at,
                     p.updated_at,
                     p.navidrome_playlist_id,
                     sp.refresh_frequency,
                     sp.next_refresh,
-                    sp.playlist_type
+                    sp.playlist_type,
+                    p.playlist_length,
+                    p.discovery_ratio,
+                    p.songs_history
                 FROM playlists p
                 LEFT JOIN scheduled_playlists sp ON p.navidrome_playlist_id = sp.navidrome_playlist_id
                 WHERE p.id = ?
             """, (playlist_id,)) as cursor:
                 row = await cursor.fetchone()
-                
+
                 if row:
                     return {
                         "id": row[0],
@@ -328,11 +334,60 @@ class DatabaseManager:
                         "navidrome_playlist_id": row[7],
                         "refresh_frequency": row[8],
                         "next_refresh": row[9],
-                        "playlist_type": row[10]
+                        "playlist_type": row[10],
+                        "playlist_length": row[11],
+                        "discovery_ratio": row[12] if row[12] is not None else 0.25,
+                        "songs_history": json.loads(row[13]) if row[13] else [],
                     }
-        
+
         return None
-    
+
+    async def get_playlist_by_navidrome_playlist_id(self, navidrome_playlist_id: str) -> Optional[Dict]:
+        """Get a playlist directly by its Navidrome playlist ID (used by refresh functions)"""
+        await self.init_db()
+
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute("""
+                SELECT
+                    p.id,
+                    p.artist_id,
+                    p.playlist_name,
+                    p.songs,
+                    p.reasoning,
+                    p.created_at,
+                    p.updated_at,
+                    p.navidrome_playlist_id,
+                    sp.refresh_frequency,
+                    sp.next_refresh,
+                    sp.playlist_type,
+                    p.playlist_length,
+                    p.discovery_ratio,
+                    p.songs_history
+                FROM playlists p
+                LEFT JOIN scheduled_playlists sp ON p.navidrome_playlist_id = sp.navidrome_playlist_id
+                WHERE p.navidrome_playlist_id = ?
+                LIMIT 1
+            """, (navidrome_playlist_id,)) as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    return {
+                        "id": row[0],
+                        "artist_id": row[1],
+                        "playlist_name": row[2],
+                        "songs": json.loads(row[3]) if row[3] else [],
+                        "reasoning": row[4],
+                        "created_at": row[5],
+                        "updated_at": row[6],
+                        "navidrome_playlist_id": row[7],
+                        "refresh_frequency": row[8],
+                        "next_refresh": row[9],
+                        "playlist_type": row[10],
+                        "playlist_length": row[11],
+                        "discovery_ratio": row[12] if row[12] is not None else 0.25,
+                        "songs_history": json.loads(row[13]) if row[13] else [],
+                    }
+        return None
+
     async def delete_playlist(self, playlist_id: int) -> bool:
         """Delete a playlist from the database"""
         await self.init_db()
@@ -425,10 +480,10 @@ class DatabaseManager:
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute("""
                 SELECT id, playlist_type, navidrome_playlist_id, refresh_frequency, next_refresh, created_at, updated_at
-                FROM scheduled_playlists 
-                WHERE next_refresh <= ? AND next_refresh >= ?
+                FROM scheduled_playlists
+                WHERE next_refresh <= ?
                 ORDER BY next_refresh ASC
-            """, (current_time.isoformat(), grace_cutoff.isoformat())) as cursor:
+            """, (current_time.isoformat(),)) as cursor:
                 rows = await cursor.fetchall()
                 
                 for row in rows:
@@ -474,21 +529,61 @@ class DatabaseManager:
             return cursor.rowcount > 0
     
     async def update_playlist_content(self, navidrome_playlist_id: str, songs: List[str], reasoning: Optional[str] = None) -> bool:
-        """Update the songs and reasoning for a playlist during refresh"""
+        """Update songs/reasoning and roll the songs_history (keeps last 4 snapshots)"""
         await self.init_db()
-        
-        songs_json = json.dumps(songs)
-        
+
         async with aiosqlite.connect(self.db_path) as db:
+            # Read current songs to push into history before overwriting
+            async with db.execute(
+                "SELECT songs, songs_history FROM playlists WHERE navidrome_playlist_id = ?",
+                (navidrome_playlist_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+
+            current_songs: List[str] = json.loads(row[0]) if row and row[0] else []
+            history: List[List[str]] = json.loads(row[1]) if row and row[1] else []
+
+            # Prepend current snapshot and keep last 4
+            if current_songs:
+                history = [current_songs] + history
+                history = history[:4]
+
             cursor = await db.execute("""
-                UPDATE playlists 
-                SET songs = ?, reasoning = ?, last_refreshed = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+                UPDATE playlists
+                SET songs = ?, songs_history = ?, reasoning = ?,
+                    last_refreshed = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
                 WHERE navidrome_playlist_id = ?
-            """, (songs_json, reasoning, navidrome_playlist_id))
-            
+            """, (json.dumps(songs), json.dumps(history), reasoning, navidrome_playlist_id))
+
             await db.commit()
             return cursor.rowcount > 0
     
+    async def update_playlist_extra_settings(self, playlist_id: int, playlist_length: Optional[int] = None, discovery_ratio: Optional[float] = None) -> bool:
+        """Update playlist_length and/or discovery_ratio for a given playlist"""
+        await self.init_db()
+
+        fields = []
+        params = []
+        if playlist_length is not None:
+            fields.append("playlist_length = ?")
+            params.append(playlist_length)
+        if discovery_ratio is not None:
+            fields.append("discovery_ratio = ?")
+            params.append(discovery_ratio)
+        if not fields:
+            return True  # Nothing to update
+
+        fields.append("updated_at = CURRENT_TIMESTAMP")
+        params.append(playlist_id)
+
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                f"UPDATE playlists SET {', '.join(fields)} WHERE id = ?",
+                params
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
     async def get_config(self, key: str) -> Optional[str]:
         """Get a configuration value by key"""
         await self.init_db()
@@ -563,36 +658,32 @@ class DatabaseManager:
             await db.commit()
             return True
 
-    async def get_user_preference(self, user_id: str, key: str) -> Optional[str]:
-        """Get a user preference value"""
+    async def get_selected_library_id(self, user_id: str) -> Optional[str]:
+        """Get the user's selected library ID"""
         await self.init_db()
-
         async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute("""
-                SELECT value FROM user_preferences WHERE user_id = ? AND key = ?
-            """, (user_id, key)) as cursor:
+            async with db.execute(
+                "SELECT selected_library_id FROM user_preferences WHERE user_id = ? LIMIT 1",
+                (user_id,)
+            ) as cursor:
                 row = await cursor.fetchone()
                 return row[0] if row else None
 
-    async def set_user_preference(self, user_id: str, key: str, value: str) -> bool:
-        """Set a user preference value"""
-        await self.init_db()
-
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("""
-                INSERT OR REPLACE INTO user_preferences (user_id, key, value, updated_at)
-                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-            """, (user_id, key, value))
-            await db.commit()
-            return True
-
-    async def get_selected_library_id(self, user_id: str) -> Optional[str]:
-        """Get the user's selected library ID"""
-        return await self.get_user_preference(user_id, "selected_library_id")
-
     async def set_selected_library_id(self, user_id: str, library_id: str) -> bool:
         """Set the user's selected library ID"""
-        return await self.set_user_preference(user_id, "selected_library_id", library_id)
+        await self.init_db()
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "UPDATE user_preferences SET selected_library_id = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
+                (library_id, user_id)
+            )
+            if cursor.rowcount == 0:
+                await db.execute(
+                    "INSERT INTO user_preferences (user_id, selected_library_id) VALUES (?, ?)",
+                    (user_id, library_id)
+                )
+            await db.commit()
+            return True
 
     async def get_cache(self, cache_key: str) -> Optional[str]:
         """Get a cached value by key, checking expiration"""
@@ -632,6 +723,66 @@ class DatabaseManager:
             deleted_count = cursor.rowcount
             await db.commit()
             return deleted_count
+
+    async def get_scheduled_playlist_by_navidrome_id(self, navidrome_playlist_id: str) -> Optional[ScheduledPlaylist]:
+        """Get a scheduled playlist by its Navidrome playlist ID"""
+        await self.init_db()
+
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute("""
+                SELECT id, playlist_type, navidrome_playlist_id, refresh_frequency, next_refresh, created_at, updated_at
+                FROM scheduled_playlists
+                WHERE navidrome_playlist_id = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+            """, (navidrome_playlist_id,)) as cursor:
+                row = await cursor.fetchone()
+
+                if row:
+                    return ScheduledPlaylist(
+                        id=row[0],
+                        playlist_type=row[1],
+                        navidrome_playlist_id=row[2],
+                        refresh_frequency=row[3],
+                        next_refresh=row[4],
+                        created_at=row[5],
+                        updated_at=row[6]
+                    )
+        return None
+
+    async def update_scheduled_playlist_settings(self, navidrome_playlist_id: str, refresh_frequency: str, next_refresh: datetime) -> bool:
+        """Update the refresh frequency and next refresh time for a scheduled playlist"""
+        await self.init_db()
+
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("""
+                UPDATE scheduled_playlists
+                SET refresh_frequency = ?, next_refresh = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE navidrome_playlist_id = ?
+            """, (refresh_frequency, next_refresh.isoformat(), navidrome_playlist_id))
+
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def delete_duplicate_scheduled_playlists(self, navidrome_playlist_id: str) -> int:
+        """Delete duplicate scheduled_playlists rows, keeping only the most recent one"""
+        await self.init_db()
+
+        async with aiosqlite.connect(self.db_path) as db:
+            # Delete all rows except the most recently created one
+            cursor = await db.execute("""
+                DELETE FROM scheduled_playlists
+                WHERE navidrome_playlist_id = ?
+                AND id NOT IN (
+                    SELECT id FROM scheduled_playlists
+                    WHERE navidrome_playlist_id = ?
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                )
+            """, (navidrome_playlist_id, navidrome_playlist_id))
+
+            await db.commit()
+            return cursor.rowcount
 
 # Dependency for FastAPI
 async def get_db() -> DatabaseManager:

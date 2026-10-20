@@ -341,7 +341,10 @@ class NavidromeClient:
                             "artist": artist_name,  # Include artist name for AI processing
                             "album": album_name,
                             "year": album_year,
-                            "play_count": song.get("playCount", 0)
+                            "play_count": song.get("playCount", 0),
+                            "local_library_likes": song.get("starred") is not None,
+                            "rating": song.get("userRating", 0),
+                            "last_played": song.get("played"),
                         })
             
             return tracks_list
@@ -424,6 +427,8 @@ class NavidromeClient:
                         "genre": song.get("genre"),
                         "play_count": song.get("playCount", 0),
                         "local_library_likes": song.get("starred") is not None,
+                        "rating": song.get("userRating", 0),
+                        "last_played": song.get("played"),
                         "duration": song.get("duration"),
                         "track_number": song.get("track")
                     }
@@ -504,6 +509,8 @@ class NavidromeClient:
                         "genre": song.get("genre"),
                         "play_count": song.get("playCount", 0),
                         "local_library_likes": song.get("starred") is not None,
+                        "rating": song.get("userRating", 0),
+                        "last_played": song.get("played"),
                         "duration": song.get("duration"),
                         "track_number": song.get("track")
                     }
@@ -880,26 +887,28 @@ class NavidromeClient:
                 
                 print(f"🎯 Successfully added all {len(track_ids)} tracks in single API call")
             
-            # Add comment via updatePlaylist if provided (createPlaylist doesn't support comments)
-            if comment:
-                print(f"💬 Adding comment to playlist via updatePlaylist...")
-                comment_params = self._get_subsonic_params()
-                comment_params["playlistId"] = playlist_id
-                comment_params["comment"] = comment
-                
-                comment_response = await self.client.get(
+            # Set public=true and optionally add comment via updatePlaylist
+            # (createPlaylist doesn't support these fields)
+            if comment or True:  # always run to ensure public=true
+                update_meta_params = self._get_subsonic_params()
+                update_meta_params["playlistId"] = playlist_id
+                update_meta_params["public"] = "true"
+                if comment:
+                    update_meta_params["comment"] = comment
+
+                meta_response = await self.client.get(
                     f"{self.base_url}/rest/updatePlaylist.view",
-                    params=comment_params
+                    params=update_meta_params
                 )
-                comment_response.raise_for_status()
-                
-                comment_data = comment_response.json()
-                comment_subsonic = comment_data.get("subsonic-response", {})
-                if comment_subsonic.get("status") != "ok":
-                    error = comment_subsonic.get("error", {})
-                    print(f"⚠️ Warning: Failed to add comment to playlist: {error.get('message', 'Unknown error')}")
+                meta_response.raise_for_status()
+
+                meta_data = meta_response.json()
+                meta_subsonic = meta_data.get("subsonic-response", {})
+                if meta_subsonic.get("status") != "ok":
+                    error = meta_subsonic.get("error", {})
+                    print(f"⚠️ Warning: Failed to set playlist public/comment: {error.get('message', 'Unknown error')}")
                 else:
-                    print(f"✅ Successfully added comment to playlist")
+                    print(f"✅ Playlist set to public{' with comment' if comment else ''}")
                 
             return playlist_id
                 
@@ -1135,6 +1144,187 @@ class NavidromeClient:
                 'total_tracks': 0
             }
     
+    async def get_tracks_for_multiple_genres(self, genres: List[str], library_ids: List[str] = None) -> List[Dict[str, Any]]:
+        """Fetch tracks for multiple genres, de-duplicated by track ID
+
+        Args:
+            genres: List of genre name strings
+            library_ids: Optional list of library IDs to filter tracks
+
+        Returns:
+            List of tracks merged from all genres, de-duplicated by id
+        """
+        all_tracks = []
+        seen_ids = set()
+        for genre in genres:
+            tracks = await self.get_tracks_by_genre(genre, library_ids)
+            for track in tracks:
+                if track["id"] not in seen_ids:
+                    seen_ids.add(track["id"])
+                    all_tracks.append(track)
+        print(f"✅ Multi-genre fetch: {len(all_tracks)} unique tracks across {len(genres)} genres")
+        return all_tracks
+
+    DECADE_YEAR_MAP = {
+        "60s": (1960, 1969),
+        "70s": (1970, 1979),
+        "80s": (1980, 1989),
+        "90s": (1990, 1999),
+        "00s": (2000, 2009),
+        "10s": (2010, 2019),
+        "20s": (2020, 2029),
+    }
+
+    async def get_tracks_by_year_range(self, year_start: int, year_end: int, library_ids: List[str] = None) -> List[Dict[str, Any]]:
+        """Fetch tracks within a specific year range using search3 with client-side filtering
+
+        Args:
+            year_start: Start year (inclusive)
+            year_end: End year (inclusive)
+            library_ids: Optional list of library IDs to filter tracks
+
+        Returns:
+            List of tracks with release year within [year_start, year_end]
+        """
+        try:
+            await self._ensure_authenticated()
+
+            all_tracks = []
+            offset = 0
+            batch_size = 500
+            library_filter = library_ids[0] if library_ids and len(library_ids) > 0 else None
+
+            print(f"🎵 Fetching tracks for years {year_start}-{year_end}")
+
+            while True:
+                params = self._get_subsonic_params()
+                params["query"] = ""
+                params["artistCount"] = 0
+                params["albumCount"] = 0
+                params["songCount"] = batch_size
+                params["songOffset"] = offset
+                if library_filter:
+                    params["musicFolderId"] = library_filter
+
+                response = await self.client.get(
+                    f"{self.base_url}/rest/search3.view",
+                    params=params
+                )
+                response.raise_for_status()
+
+                data = response.json()
+                subsonic_response = data.get("subsonic-response", {})
+                if subsonic_response.get("status") != "ok":
+                    error = subsonic_response.get("error", {})
+                    raise Exception(f"Subsonic API error: {error.get('message', 'Unknown error')}")
+
+                search_result = subsonic_response.get("searchResult3", {})
+                songs = search_result.get("song", [])
+
+                if not songs:
+                    break
+
+                for song in songs:
+                    song_year = song.get("year", 0) or 0
+                    if year_start <= song_year <= year_end:
+                        all_tracks.append({
+                            "id": song.get("id"),
+                            "title": song.get("title"),
+                            "artist": song.get("artist"),
+                            "album": song.get("album"),
+                            "year": song_year,
+                            "genre": song.get("genre"),
+                            "play_count": song.get("playCount", 0),
+                            "local_library_likes": song.get("starred") is not None,
+                            "rating": song.get("userRating", 0),
+                            "last_played": song.get("played"),
+                            "duration": song.get("duration"),
+                        })
+
+                offset += batch_size
+                if len(songs) < batch_size or offset >= 50000:
+                    break
+
+            print(f"✅ Year-range fetch: {len(all_tracks)} tracks for {year_start}-{year_end}")
+            return all_tracks
+
+        except Exception as e:
+            raise Exception(f"Unexpected error fetching tracks by year range: {e}")
+
+    async def get_all_tracks(self, library_ids: List[str] = None, max_tracks: int = 3000) -> List[Dict[str, Any]]:
+        """Fetch tracks from the full library using search3, up to max_tracks
+
+        Args:
+            library_ids: Optional list of library IDs to filter tracks
+            max_tracks: Maximum number of tracks to fetch (default: 3000)
+
+        Returns:
+            List of tracks from the library
+        """
+        try:
+            await self._ensure_authenticated()
+
+            all_tracks = []
+            offset = 0
+            batch_size = 500
+            library_filter = library_ids[0] if library_ids and len(library_ids) > 0 else None
+
+            print(f"🎵 Fetching up to {max_tracks} tracks from full library")
+
+            while len(all_tracks) < max_tracks:
+                params = self._get_subsonic_params()
+                params["query"] = ""
+                params["artistCount"] = 0
+                params["albumCount"] = 0
+                params["songCount"] = batch_size
+                params["songOffset"] = offset
+                if library_filter:
+                    params["musicFolderId"] = library_filter
+
+                response = await self.client.get(
+                    f"{self.base_url}/rest/search3.view",
+                    params=params
+                )
+                response.raise_for_status()
+
+                data = response.json()
+                subsonic_response = data.get("subsonic-response", {})
+                if subsonic_response.get("status") != "ok":
+                    error = subsonic_response.get("error", {})
+                    raise Exception(f"Subsonic API error: {error.get('message', 'Unknown error')}")
+
+                search_result = subsonic_response.get("searchResult3", {})
+                songs = search_result.get("song", [])
+
+                if not songs:
+                    break
+
+                for song in songs:
+                    all_tracks.append({
+                        "id": song.get("id"),
+                        "title": song.get("title"),
+                        "artist": song.get("artist"),
+                        "album": song.get("album"),
+                        "year": song.get("year", 0) or 0,
+                        "genre": song.get("genre"),
+                        "play_count": song.get("playCount", 0),
+                        "local_library_likes": song.get("starred") is not None,
+                        "rating": song.get("userRating", 0),
+                        "last_played": song.get("played"),
+                        "duration": song.get("duration"),
+                    })
+
+                offset += batch_size
+                if len(songs) < batch_size:
+                    break
+
+            result = all_tracks[:max_tracks]
+            print(f"✅ Full library fetch: {len(result)} tracks")
+            return result
+
+        except Exception as e:
+            raise Exception(f"Unexpected error fetching all tracks: {e}")
+
     async def close(self):
         """Close the HTTP client"""
         await self.client.aclose()

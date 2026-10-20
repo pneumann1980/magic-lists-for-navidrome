@@ -144,6 +144,9 @@ class AIProvider:
     
     async def _generate_google(self, system_prompt: str, user_prompt: str, max_tokens: int = 16000, temperature: float = 0.7) -> Union[str, NoReturn]:  # type: ignore
         """Handle Google AI's specific API format with controlled generation for JSON"""
+        import asyncio
+        import time
+
         url = f"{self.base_url}/models/{self.model}:generateContent?key={self.api_key}"
 
         # Add JSON-specific instructions to the prompt
@@ -157,12 +160,8 @@ class AIProvider:
         {user_prompt}
         """
 
-        # For genre mix, responses are small JSON, so cap output tokens reasonably
-        if "Genre Mix" in system_prompt or "genre_mix" in user_prompt.lower():
-            # max_output = 2500  # Genre mix responses are ~500 tokens
-            max_output = min(int(max_tokens), 16000)
-        else:
-            max_output = min(int(max_tokens), 16000)
+        # gemini-2.5-flash supports up to 65536 output tokens
+        max_output = min(int(max_tokens), 65536)
 
         generation_config = {
             "temperature": temperature,
@@ -180,97 +179,105 @@ class AIProvider:
 
         headers = {"Content-Type": "application/json"}
 
-        # Debug: Save payload to file for inspection
-        import json
-        import time
-        timestamp = int(time.time())
-
-        # Add debug info to payload
-        debug_info = {
-            "timestamp": timestamp,
-            "model": self.model,
-            "max_tokens_param": max_tokens,
-            "max_output_tokens_calculated": generation_config.get("maxOutputTokens"),
-            "combined_prompt_length": len(combined_prompt),
-            "system_prompt_length": len(system_prompt),
-            "user_prompt_length": len(user_prompt),
-            "is_genre_mix": "Genre Mix" in system_prompt or "genre_mix" in user_prompt.lower()
-        }
-
-        payload_with_debug = {
-            "debug_info": debug_info,
-            "payload": payload
-        }
-
-        payload_file = f"payloads/google_ai_payload_{timestamp}.json"
-        with open(payload_file, 'w') as f:
-            json.dump(payload, f, indent=2)
-        print(f"📄 Saved payload to {payload_file} (prompt: ~{len(combined_prompt)//4} tokens)")
-
+        # Debug: Save payload to file for inspection (non-fatal if directory missing)
         try:
-            response = await self.client.post(
-                url,
-                json=payload,
-                headers=headers,
-                timeout=60.0
-            )
-            response.raise_for_status()
+            os.makedirs("payloads", exist_ok=True)
+            timestamp = int(time.time())
+            payload_file = f"payloads/google_ai_payload_{timestamp}.json"
+            with open(payload_file, 'w') as f:
+                json.dump(payload, f, indent=2)
+            print(f"📄 Saved payload to {payload_file} (prompt: ~{len(combined_prompt)//4} tokens)")
+        except OSError as e:
+            print(f"⚠️  Could not save debug payload: {e}")
 
-            result = response.json()
+        # Retry loop for transient 500/503 errors
+        max_retries = 3
+        retry_delay = 5
 
-            if "candidates" in result and len(result["candidates"]) > 0:
-                candidate = result["candidates"][0]
+        for attempt in range(max_retries):
+            try:
+                response = await self.client.post(
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=120.0
+                )
+                response.raise_for_status()
+                break  # Success — exit retry loop
+            except httpx.HTTPStatusError as e:
+                # Try to extract the API's own error message from the JSON body
+                try:
+                    api_error = e.response.json().get("error", {})
+                    api_message = api_error.get("message", "")
+                    error_desc = (
+                        f"HTTP {e.response.status_code}: {api_message}"
+                        if api_message
+                        else f"HTTP {e.response.status_code} — {e.response.text[:300]}"
+                    )
+                except Exception:
+                    error_desc = f"HTTP {e.response.status_code} — {e.response.text[:300]}"
 
-                # Check finish reason 
-                finish_reason = candidate.get("finishReason", "")
-                if finish_reason:
-                    if finish_reason in ["SAFETY", "RECITATION", "OTHER"]:
-                        raise Exception(f"Google AI blocked the response due to: {finish_reason}")
-                    elif finish_reason == "MAX_TOKENS":
-                        # This means output hit the limit, not input
-                        prompt_tokens = result.get('usageMetadata', {}).get('promptTokenCount', 'unknown')
-                        output_tokens = result.get('usageMetadata', {}).get('candidatesTokenCount', 'unknown')
-                        raise Exception( 
-                            f"Google AI response incomplete: output hit {max_output} token limit. "
-                            f"Input: {prompt_tokens} tokens, Output: {output_tokens} tokens. "
-                            f"Increase max_tokens parameter if you need longer responses."
-                        )
+                if e.response.status_code in (500, 503) and attempt < max_retries - 1:
+                    print(f"🔄 Google AI transient error {e.response.status_code} (attempt {attempt + 1}/{max_retries}), retrying in {retry_delay}s...")
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2
+                    continue
+                raise Exception(f"Google AI error: {error_desc}")
+            except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.TimeoutException) as e:
+                if attempt < max_retries - 1:
+                    print(f"🔄 Google AI timeout (attempt {attempt + 1}/{max_retries}), retrying in {retry_delay}s...")
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2
+                    continue
+                raise Exception(f"Google AI error: request timed out after {max_retries} attempts")
+            except Exception as e:
+                raise Exception(f"Google AI error: {str(e)}")
 
-                # Parse the actual content
-                if "content" in candidate:
-                    content = candidate["content"]
+        result = response.json()
 
-                    if "parts" in content and isinstance(content["parts"], list):
-                        parts = content["parts"]
-                        if len(parts) > 0:
-                            part = parts[0]
-                            if "text" in part:
-                                text = part["text"].strip()
+        if "candidates" in result and len(result["candidates"]) > 0:
+            candidate = result["candidates"][0]
 
-                                # Try to extract JSON from the response
+            # Check finish reason
+            finish_reason = candidate.get("finishReason", "")
+            if finish_reason:
+                if finish_reason in ["SAFETY", "RECITATION", "OTHER"]:
+                    raise Exception(f"Google AI blocked the response due to: {finish_reason}")
+                elif finish_reason == "MAX_TOKENS":
+                    prompt_tokens = result.get('usageMetadata', {}).get('promptTokenCount', 'unknown')
+                    output_tokens = result.get('usageMetadata', {}).get('candidatesTokenCount', 'unknown')
+                    raise Exception(
+                        f"Google AI response incomplete: output hit {max_output} token limit. "
+                        f"Input: {prompt_tokens} tokens, Output: {output_tokens} tokens. "
+                        f"Increase max_tokens parameter if you need longer responses."
+                    )
+
+            # Parse the actual content
+            if "content" in candidate:
+                content = candidate["content"]
+                if "parts" in content and isinstance(content["parts"], list):
+                    parts = content["parts"]
+                    if len(parts) > 0 and "text" in parts[0]:
+                        text = parts[0]["text"].strip()
+
+                        # Try to extract JSON from the response
+                        try:
+                            json_response = json.loads(text)
+                            return json.dumps(json_response, ensure_ascii=False)
+                        except json.JSONDecodeError:
+                            json_match = re.search(r'\{.*\}', text, re.DOTALL)
+                            if json_match:
                                 try:
-                                    # First try direct JSON parsing
-                                    json_response = json.loads(text)
+                                    json_response = json.loads(json_match.group())
                                     return json.dumps(json_response, ensure_ascii=False)
                                 except json.JSONDecodeError:
-                                    # Try to find JSON within the text (in case of extra content)
-                                    json_match = re.search(r'\{.*\}', text, re.DOTALL)
-                                    if json_match:
-                                        try:
-                                            json_response = json.loads(json_match.group())
-                                            return json.dumps(json_response, ensure_ascii=False)
-                                        except json.JSONDecodeError:
-                                            pass
+                                    pass
+                            # Return text as-is and let upstream handle it
+                            return text
 
-                                    # If all else fails, return the text as-is and let upstream handle it
-                                    return text
+            raise Exception("Google AI response missing content structure")
 
-                raise Exception("Google AI response missing content structure")
-
-            raise Exception("Google AI response missing candidates array")
-
-        except Exception as e:
-            raise Exception(f"Google AI error: {str(e)}")
+        raise Exception("Google AI response missing candidates array")
 
     async def close(self):
         """Close the HTTP client"""

@@ -24,6 +24,7 @@ class CreateGenrePlaylistRequest(BaseModel):
     refresh_frequency: str = "none"  # "none", "daily", "weekly", "monthly"
     playlist_length: int = 25  # Number of tracks to include
     library_ids: List[str] = []  # List of library IDs to filter tracks
+    discovery_ratio: float = 0.25  # 0.0 = all familiar, 0.75 = max discovery
 
 class Playlist(BaseModel):
     """Schema for a stored playlist"""
@@ -107,3 +108,56 @@ class PlaylistWithScheduleInfo(BaseModel):
     refresh_frequency: Optional[str] = None
     next_refresh: Optional[str] = None
     playlist_type: Optional[str] = None
+
+class UpdatePlaylistSettingsRequest(BaseModel):
+    """Request schema for updating playlist refresh settings"""
+    refresh_frequency: str  # "none", "daily", "weekly", "monthly"
+    playlist_length: Optional[int] = None  # Number of tracks; None = no change
+    discovery_ratio: Optional[float] = None  # 0.0–0.75; None = no change
+
+class CreateMultiArtistRadioRequest(BaseModel):
+    """Request schema for creating a Multi-Artist Radio Blend playlist"""
+    artist_ids: List[str]
+    playlist_name: Optional[str] = None
+    refresh_frequency: str = "none"
+    playlist_length: int = 30
+    library_ids: List[str] = []
+
+class CreateMultiGenreMixRequest(BaseModel):
+    """Request schema for creating a Multi-Genre Mix playlist"""
+    genres: List[str]
+    playlist_name: Optional[str] = None
+    refresh_frequency: str = "none"
+    playlist_length: int = 30
+    library_ids: List[str] = []
+    discovery_ratio: float = 0.25  # 0.0 = all familiar, 0.75 = max discovery
+
+class CreateDecadeDiscoveryRequest(BaseModel):
+    """Request schema for creating a Decade & Discovery playlist"""
+    decades: List[str]
+    mode: str = "Blend"
+    playlist_name: Optional[str] = None
+    refresh_frequency: str = "none"
+    playlist_length: int = 30
+    library_ids: List[str] = []
+    discovery_ratio: float = 0.25  # 0.0 = all familiar, 0.75 = max discovery
+
+class CreateSonicJourneyRequest(BaseModel):
+    """Request schema for creating a Sonic Journey playlist"""
+    start_artist_id: str
+    end_artist_id: str
+    playlist_name: Optional[str] = None
+    refresh_frequency: str = "none"
+    playlist_length: int = 30
+    library_ids: List[str] = []
+    discovery_ratio: float = 0.20  # 0.0 = all familiar, 0.75 = max discovery
+
+class CreateGenreArchaeologyRequest(BaseModel):
+    """Request schema for creating a Genre Archaeology playlist"""
+    genre: str
+    dig_depth: str = "Medium"
+    playlist_name: Optional[str] = None
+    refresh_frequency: str = "none"
+    playlist_length: int = 30
+    library_ids: List[str] = []
+    discovery_ratio: float = 0.30  # 0.0 = all familiar, 0.75 = max discovery

@@ -3,6 +3,22 @@ let selectedArtistId = null;
 let selectedGenre = null;
 let allArtists = [];
 let allGenres = [];
+
+// Multi-Artist Radio state
+let marSelectedArtists = []; // array of {id, name}
+
+// Multi-Genre Mix state
+let mgmSelectedGenres = []; // array of genre name strings
+
+// Decade Discovery state
+let ddSelectedDecades = []; // array of decade strings
+
+// Sonic Journey state
+let sjStartArtistId = null;
+let sjEndArtistId = null;
+
+// Genre Archaeology state
+let gaSelectedGenre = null;
 let currentToast = null;
 
 // Global state for library selection
@@ -52,6 +68,11 @@ function showToast(type, message, duration = 5000) {
         textClass = 'text-blue-800';
         borderClass = 'border';
         icon = '<svg class="size-4 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>';
+    } else if (type === 'warning') {
+        bgClass = 'bg-amber-50 border-amber-200';
+        textClass = 'text-amber-800';
+        borderClass = 'border';
+        icon = '<svg class="size-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>';
     } else {
         bgClass = 'bg-red-50 border-red-200';
         textClass = 'text-red-800';
@@ -104,6 +125,23 @@ function hideToast(toastId) {
                 currentToast = null;
             }
         }, 300);
+    }
+}
+
+// Fetch wrapper with a 120-second timeout for long-running AI playlist creation requests.
+// Shows a clear error if the server takes too long rather than leaving the UI stuck.
+async function fetchWithTimeout(url, options, timeoutMs = 120000) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        return await fetch(url, { ...options, signal: controller.signal });
+    } catch (err) {
+        if (err.name === 'AbortError') {
+            throw new Error('Request timed out after 2 minutes. The AI service may be busy — please try again.');
+        }
+        throw err;
+    } finally {
+        clearTimeout(timeoutId);
     }
 }
 
@@ -187,7 +225,7 @@ function setActiveMenuItem(page) {
 // Navigation functionality
 function showContent(contentId) {
     // Hide all content sections
-    const contentSections = ['welcome-content', 'this-is-content', 'rediscover-content', 'genre-mix-content', 'manage-playlists-content', 'system-check-content', 'terms-content'];
+    const contentSections = ['welcome-content', 'this-is-content', 'rediscover-content', 'genre-mix-content', 'manage-playlists-content', 'system-check-content', 'terms-content', 'multi-artist-radio-content', 'multi-genre-mix-content', 'decade-discovery-content', 'sonic-journey-content', 'genre-archaeology-content'];
     contentSections.forEach(id => {
         const element = document.getElementById(id);
         if (element) {
@@ -736,6 +774,14 @@ function handleLibraryCheckboxChange(e) {
         loadArtists();
     } else if (currentPage === 'genre-mix') {
         loadGenres();
+    } else if (currentPage === 'multi-artist-radio') {
+        loadArtistsForMAR();
+    } else if (currentPage === 'multi-genre-mix') {
+        loadGenresForMGM();
+    } else if (currentPage === 'sonic-journey') {
+        loadArtistsForSJ();
+    } else if (currentPage === 'genre-archaeology') {
+        loadGenresForGA();
     }
 
     console.log(`📚 Library selection updated:`, selectedLibraryIds);
@@ -805,7 +851,7 @@ async function createArtistPlaylist() {
         const refreshFrequency = document.querySelector('input[name="artist-refresh-frequency"]:checked').value;
         const playlistLength = document.querySelector('input[name="artist-playlist-length"]:checked').value;
 
-        const response = await fetch('/api/create_playlist', {
+        const response = await fetchWithTimeout('/api/create_playlist', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -870,7 +916,8 @@ async function createGenrePlaylist() {
         const refreshFrequency = document.querySelector('input[name="genre-refresh-frequency"]:checked').value;
         const playlistLength = document.querySelector('input[name="genre-playlist-length"]:checked').value;
 
-        const response = await fetch('/api/create_genre_playlist', {
+        const genreDiscoveryRatio = parseFloat(document.getElementById('genre-discovery-ratio').value) / 100;
+        const response = await fetchWithTimeout('/api/create_genre_playlist', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -879,7 +926,8 @@ async function createGenrePlaylist() {
                 genre: selectedGenre,
                 refresh_frequency: refreshFrequency,
                 playlist_length: parseInt(playlistLength),
-                library_ids: selectedLibraryIds
+                library_ids: selectedLibraryIds,
+                discovery_ratio: genreDiscoveryRatio
             })
         });
 
@@ -933,7 +981,7 @@ async function generateRediscoverWeekly() {
         const refreshFrequency = document.querySelector('input[name="rediscover-refresh-frequency"]:checked').value;
         const playlistLength = document.querySelector('input[name="rediscover-playlist-length"]:checked').value;
 
-        const response = await fetch('/api/create-rediscover-playlist-v2', {
+        const response = await fetchWithTimeout('/api/create-rediscover-playlist-v2', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -1093,38 +1141,264 @@ function truncateText(text, maxLength) {
     return text.length > maxLength ? text.substring(0, maxLength) + '...' : text;
 }
 
+function updateDiscoveryLabel(labelId, value) {
+    const pct = parseInt(value);
+    let desc;
+    if (pct === 0) desc = 'Familiar only (0%)';
+    else if (pct <= 15) desc = `Mostly familiar (${pct}%)`;
+    else if (pct <= 30) desc = `Balanced (${pct}%)`;
+    else if (pct <= 50) desc = `More discovery (${pct}%)`;
+    else desc = `Max discovery (${pct}%)`;
+    const el = document.getElementById(labelId);
+    if (el) el.textContent = desc;
+}
+
 function renderPlaylists(playlists) {
     const container = document.getElementById('playlists-container');
-    
+
     container.innerHTML = playlists.map(playlist => {
+        const hasSchedule = playlist.refresh_frequency && playlist.refresh_frequency !== 'none';
+        const escapedName = playlist.playlist_name.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+
         return `
-            <div class="flex items-start justify-between p-4 border border-gray-200 rounded-lg mb-4">
-                <div class="flex-grow">
-                    <h3 class="text-lg font-semibold text-gray-900 mb-1">${playlist.playlist_name}</h3>
-                    <div class="text-sm text-gray-600 mb-2 space-y-1">
-                        <p class="mb-0">
-                            ${playlist.track_count || 0} tracks • 
-                            Refreshes ${playlist.refresh_frequency || 'manually'} • 
-                            ${playlist.next_refresh ? `Next refresh ${formatNextRefresh(playlist.next_refresh)}` : 'No scheduled refresh'}
-                        </p>
-                        <p class="mb-0">
-                            Created ${formatFriendlyDate(playlist.created_at)} • 
-                            ${playlist.last_refreshed ? `Refreshed ${formatFriendlyDate(playlist.last_refreshed)}` : 'Not refreshed yet'}
-                        </p>
+            <div class="border border-gray-200 rounded-lg mb-4 overflow-hidden" id="playlist-card-${playlist.id}">
+                <div class="flex items-start justify-between p-4">
+                    <div class="flex-grow min-w-0">
+                        <h3 class="text-lg font-semibold text-gray-900 mb-1">${playlist.playlist_name}</h3>
+                        <div class="text-sm text-gray-600 mb-2 space-y-1">
+                            <p class="mb-0">
+                                ${playlist.track_count || 0} tracks •
+                                Refreshes <span id="freq-label-${playlist.id}">${playlist.refresh_frequency || 'manually'}</span> •
+                                <span id="next-refresh-label-${playlist.id}">${playlist.next_refresh ? `Next ${formatNextRefresh(playlist.next_refresh)}` : 'No scheduled refresh'}</span>
+                            </p>
+                            <p class="mb-0">
+                                Created ${formatFriendlyDate(playlist.created_at)} •
+                                <span id="last-refreshed-label-${playlist.id}">${playlist.last_refreshed ? `Refreshed ${formatFriendlyDate(playlist.last_refreshed)}` : 'Not refreshed yet'}</span>
+                            </p>
+                        </div>
+                        ${playlist.reasoning ? `<p class="text-sm text-gray-600 m-0 mt-2 italic">${truncateText(playlist.reasoning, 140)}</p>` : ''}
                     </div>
-                    ${playlist.reasoning ? `<p class="text-sm text-gray-600 m-0 mt-2 italic">${truncateText(playlist.reasoning, 140)}</p>` : ''}
+                    <div class="flex-none flex flex-col items-end gap-1 ml-4">
+                        ${hasSchedule ? `
+                        <button
+                            id="refresh-btn-${playlist.id}"
+                            onclick="refreshPlaylistNow(${playlist.id}, '${escapedName}')"
+                            class="text-sm font-medium cursor-pointer border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 rounded px-2 py-1 whitespace-nowrap"
+                        >
+                            Refresh Now
+                        </button>
+                        ` : ''}
+                        <button
+                            onclick="toggleModifyPanel(${playlist.id})"
+                            class="text-sm font-medium cursor-pointer border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 rounded px-2 py-1 whitespace-nowrap"
+                        >
+                            Modify
+                        </button>
+                        <button
+                            onclick="deletePlaylist(${playlist.id}, '${escapedName}')"
+                            class="text-sm font-medium cursor-pointer border-none bg-transparent text-red-600 hover:text-red-800 px-2 py-1 whitespace-nowrap"
+                        >
+                            Delete
+                        </button>
+                    </div>
                 </div>
-                <div class="flex-none">
-                    <button
-                        onclick="deletePlaylist(${playlist.id}, '${playlist.playlist_name}')"
-                        class="text-sm font-medium underline cursor-pointer border-none bg-transparent text-red-600 hover:text-red-800 px-2 py-1"
-                    >
-                        Delete
-                    </button>
+                <!-- Inline modify panel (hidden by default) -->
+                <div id="modify-panel-${playlist.id}" class="hidden border-t border-gray-100 bg-gray-50 px-4 py-3 space-y-3">
+                    <!-- Playlist length -->
+                    <div>
+                        <p class="text-sm font-medium text-gray-700 mb-1">Playlist length</p>
+                        <div class="flex flex-wrap gap-2">
+                            ${[25, 30, 50, 100].map(n => `
+                            <label class="flex items-center gap-1 cursor-pointer">
+                                <input type="radio" name="pl-length-${playlist.id}" value="${n}" ${(playlist.playlist_length || 25) == n ? 'checked' : ''} class="accent-indigo-600">
+                                <span class="text-sm text-gray-700">${n}</span>
+                            </label>`).join('')}
+                        </div>
+                    </div>
+                    <!-- Discovery ratio (only for types with user-configurable discovery) -->
+                    ${['genre_mix','multi_genre_mix','decade_discovery','sonic_journey','genre_archaeology'].includes(playlist.playlist_type) ? `
+                    <div>
+                        <p class="text-sm font-medium text-gray-700 mb-1">Discovery Mode — <span id="modify-dr-label-${playlist.id}" class="text-indigo-600 font-normal"></span></p>
+                        <input type="range" id="modify-dr-${playlist.id}"
+                               min="0" max="75" step="5"
+                               value="${Math.round((playlist.discovery_ratio || 0.25) * 100)}"
+                               class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
+                               oninput="updateDiscoveryLabel('modify-dr-label-${playlist.id}', this.value)">
+                        <div class="flex justify-between text-xs text-gray-400 mt-1">
+                            <span>Familiar favourites</span>
+                            <span>Deeper cuts &amp; discoveries</span>
+                        </div>
+                    </div>` : ''}
+                    <!-- Refresh frequency -->
+                    <div>
+                        <p class="text-sm font-medium text-gray-700 mb-1">Refresh frequency</p>
+                        <select
+                            id="freq-select-${playlist.id}"
+                            class="text-sm border border-gray-200 rounded-lg px-3 py-2 bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                        >
+                            <option value="none" ${(!playlist.refresh_frequency || playlist.refresh_frequency === 'none') ? 'selected' : ''}>No auto-refresh</option>
+                            <option value="daily" ${playlist.refresh_frequency === 'daily' ? 'selected' : ''}>Daily</option>
+                            <option value="weekly" ${playlist.refresh_frequency === 'weekly' ? 'selected' : ''}>Weekly</option>
+                            <option value="monthly" ${playlist.refresh_frequency === 'monthly' ? 'selected' : ''}>Monthly</option>
+                        </select>
+                    </div>
+                    <!-- Actions -->
+                    <div class="flex items-center gap-2">
+                        <button
+                            onclick="savePlaylistSettings(${playlist.id})"
+                            class="text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white rounded-lg px-4 py-2 cursor-pointer border-0"
+                        >
+                            Save
+                        </button>
+                        <button
+                            onclick="toggleModifyPanel(${playlist.id})"
+                            class="text-sm text-gray-500 hover:text-gray-700 cursor-pointer border-none bg-transparent px-2 py-2"
+                        >
+                            Cancel
+                        </button>
+                    </div>
                 </div>
             </div>
         `;
     }).join('');
+}
+
+function toggleModifyPanel(playlistId) {
+    const panel = document.getElementById(`modify-panel-${playlistId}`);
+    if (panel) {
+        panel.classList.toggle('hidden');
+        // Initialize discovery label when panel becomes visible
+        if (!panel.classList.contains('hidden')) {
+            const drSlider = document.getElementById(`modify-dr-${playlistId}`);
+            if (drSlider) {
+                updateDiscoveryLabel(`modify-dr-label-${playlistId}`, drSlider.value);
+            }
+        }
+    }
+}
+
+async function savePlaylistSettings(playlistId) {
+    const select = document.getElementById(`freq-select-${playlistId}`);
+    if (!select) return;
+
+    const newFrequency = select.value;
+
+    // Playlist length (radio buttons)
+    const checkedLength = document.querySelector(`input[name="pl-length-${playlistId}"]:checked`);
+    const newLength = checkedLength ? parseInt(checkedLength.value) : null;
+
+    // Discovery ratio slider (only present for applicable playlist types)
+    const drSlider = document.getElementById(`modify-dr-${playlistId}`);
+    const newDiscoveryRatio = drSlider ? parseFloat(drSlider.value) / 100 : null;
+
+    const payload = { refresh_frequency: newFrequency };
+    if (newLength !== null) payload.playlist_length = newLength;
+    if (newDiscoveryRatio !== null) payload.discovery_ratio = newDiscoveryRatio;
+
+    try {
+        const response = await fetch(`/api/playlists/${playlistId}/settings`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+            const err = await response.json().catch(() => ({ detail: 'Unknown error' }));
+            throw new Error(err.detail || 'Failed to save settings');
+        }
+
+        const data = await response.json();
+
+        // Update labels in place without a full reload
+        const freqLabel = document.getElementById(`freq-label-${playlistId}`);
+        const nextLabel = document.getElementById(`next-refresh-label-${playlistId}`);
+        const card = document.getElementById(`playlist-card-${playlistId}`);
+
+        if (freqLabel) freqLabel.textContent = newFrequency === 'none' ? 'manually' : newFrequency;
+
+        if (nextLabel) {
+            if (data.next_refresh) {
+                nextLabel.textContent = `Next ${formatNextRefresh(data.next_refresh)}`;
+            } else {
+                nextLabel.textContent = 'No scheduled refresh';
+            }
+        }
+
+        // Show/hide the Refresh Now button based on new frequency
+        const refreshBtn = document.getElementById(`refresh-btn-${playlistId}`);
+        const actionsDiv = refreshBtn ? refreshBtn.parentElement : null;
+        if (actionsDiv) {
+            if (newFrequency !== 'none' && !refreshBtn) {
+                // Re-render to show the Refresh Now button (simplest approach)
+                loadPlaylists();
+                return;
+            } else if (newFrequency === 'none' && refreshBtn) {
+                refreshBtn.remove();
+            }
+        }
+
+        // Hide the panel
+        toggleModifyPanel(playlistId);
+        showToast('success', 'Settings saved — playlist content updates on next refresh');
+
+    } catch (error) {
+        console.error('Error saving playlist settings:', error);
+        showToast('error', error.message);
+    }
+}
+
+async function refreshPlaylistNow(playlistId, playlistName) {
+    const btn = document.getElementById(`refresh-btn-${playlistId}`);
+    const originalText = btn ? btn.textContent : 'Refresh Now';
+
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Refreshing…';
+        btn.classList.add('opacity-60', 'cursor-not-allowed');
+    }
+
+    const toastId = showToast('loading', `Refreshing "${playlistName}"… This may take a minute.`, 0);
+
+    try {
+        const response = await fetchWithTimeout(`/api/playlists/${playlistId}/refresh`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        }, 180000);
+
+        if (response.status === 503) {
+            const err = await response.json().catch(() => ({}));
+            hideToast(toastId);
+            showToast('warning', err.detail || 'AI service temporarily unavailable — playlist unchanged, retry scheduled in 1 hour.');
+            if (btn) {
+                btn.disabled = false;
+                btn.textContent = originalText;
+                btn.classList.remove('opacity-60', 'cursor-not-allowed');
+            }
+            return;
+        }
+
+        if (!response.ok) {
+            const err = await response.json().catch(() => ({ detail: 'Unknown error' }));
+            throw new Error(err.detail || 'Failed to refresh playlist');
+        }
+
+        hideToast(toastId);
+        showToast('success', `"${playlistName}" has been refreshed successfully!`);
+
+        // Update the "last refreshed" label by reloading playlist list
+        loadPlaylists();
+
+    } catch (error) {
+        console.error('Error refreshing playlist:', error);
+        hideToast(toastId);
+        showToast('error', error.message);
+
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = originalText;
+            btn.classList.remove('opacity-60', 'cursor-not-allowed');
+        }
+    }
 }
 
 async function deletePlaylist(playlistId, playlistName) {
@@ -1383,6 +1657,21 @@ function updateURL(page) {
         case 'terms':
             url = '/terms';
             break;
+        case 'multi-artist-radio':
+            url = '/multi-artist-radio';
+            break;
+        case 'multi-genre-mix':
+            url = '/multi-genre-mix';
+            break;
+        case 'decade-discovery':
+            url = '/decade-discovery';
+            break;
+        case 'sonic-journey':
+            url = '/sonic-journey';
+            break;
+        case 'genre-archaeology':
+            url = '/genre-archaeology';
+            break;
         default:
             url = '/';
     }
@@ -1445,6 +1734,21 @@ function getPageFromURL(pathname) {
         case '/terms':
             page = 'terms';
             break;
+        case '/multi-artist-radio':
+            page = 'multi-artist-radio';
+            break;
+        case '/multi-genre-mix':
+            page = 'multi-genre-mix';
+            break;
+        case '/decade-discovery':
+            page = 'decade-discovery';
+            break;
+        case '/sonic-journey':
+            page = 'sonic-journey';
+            break;
+        case '/genre-archaeology':
+            page = 'genre-archaeology';
+            break;
         default:
             page = 'home';
             break;
@@ -1487,6 +1791,29 @@ function handlePageNavigation(page) {
         setTimeout(() => runSystemChecks(), 100);
     } else if (page === 'terms') {
         contentId = 'terms-content';
+    } else if (page === 'multi-artist-radio') {
+        contentId = 'multi-artist-radio-content';
+        if (selectedLibraryIds.length > 0) {
+            setTimeout(() => loadArtistsForMAR(), 100);
+        }
+    } else if (page === 'multi-genre-mix') {
+        contentId = 'multi-genre-mix-content';
+        if (selectedLibraryIds.length > 0) {
+            setTimeout(() => loadGenresForMGM(), 100);
+        }
+    } else if (page === 'decade-discovery') {
+        contentId = 'decade-discovery-content';
+        setTimeout(() => initDecadeChips(), 100);
+    } else if (page === 'sonic-journey') {
+        contentId = 'sonic-journey-content';
+        if (selectedLibraryIds.length > 0) {
+            setTimeout(() => loadArtistsForSJ(), 100);
+        }
+    } else if (page === 'genre-archaeology') {
+        contentId = 'genre-archaeology-content';
+        if (selectedLibraryIds.length > 0) {
+            setTimeout(() => loadGenresForGA(), 100);
+        }
     }
 
     setActiveMenuItem(page);
@@ -1494,3 +1821,392 @@ function handlePageNavigation(page) {
 }
 
 
+
+
+// ============================================================
+// MULTI-ARTIST RADIO
+// ============================================================
+
+async function loadArtistsForMAR() {
+    if (allArtists.length === 0) {
+        try {
+            const url = selectedLibraryIds.length > 0
+                ? `/api/artists?library_ids=${selectedLibraryIds.join(',')}`
+                : '/api/artists';
+            const response = await fetch(url);
+            if (response.ok) allArtists = await response.json();
+        } catch (e) { console.error('Failed to load artists for MAR:', e); return; }
+    }
+    const select = document.getElementById('mar-artist-select');
+    if (!select) return;
+    while (select.options.length > 1) select.remove(1);
+    allArtists.forEach(artist => {
+        const opt = document.createElement('option');
+        opt.value = artist.id;
+        opt.textContent = artist.name;
+        select.appendChild(opt);
+    });
+    select.onchange = function() {
+        const artistId = this.value;
+        if (!artistId) return;
+        if (marSelectedArtists.find(a => a.id === artistId)) { this.value = ''; return; }
+        if (marSelectedArtists.length >= 6) { showToast('error', 'Maximum 6 artists allowed'); this.value = ''; return; }
+        const artist = allArtists.find(a => a.id === artistId);
+        if (!artist) return;
+        marSelectedArtists.push({ id: artist.id, name: artist.name });
+        renderMARTags();
+        this.value = '';
+        updateMARSubmitButton();
+    };
+}
+
+function renderMARTags() {
+    const container = document.getElementById('mar-selected-artists');
+    const placeholder = document.getElementById('mar-artist-placeholder');
+    const countEl = document.getElementById('mar-artist-count');
+    if (!container) return;
+    container.querySelectorAll('.mar-tag').forEach(t => t.remove());
+    if (marSelectedArtists.length === 0) {
+        if (placeholder) placeholder.style.display = '';
+    } else {
+        if (placeholder) placeholder.style.display = 'none';
+        marSelectedArtists.forEach(artist => {
+            const tag = document.createElement('span');
+            tag.className = 'mar-tag inline-flex items-center gap-1 px-3 py-1 rounded-full text-sm bg-blue-100 text-blue-800';
+            tag.innerHTML = `${artist.name} <button type="button" onclick="removeMARartist('${artist.id}')" class="ml-1 hover:text-blue-600 font-bold">&times;</button>`;
+            container.appendChild(tag);
+        });
+    }
+    if (countEl) countEl.textContent = marSelectedArtists.length;
+}
+
+function removeMARartist(artistId) {
+    marSelectedArtists = marSelectedArtists.filter(a => a.id !== artistId);
+    renderMARTags();
+    updateMARSubmitButton();
+}
+
+function updateMARSubmitButton() {
+    const btn = document.getElementById('create-mar-playlist-btn');
+    if (btn) btn.disabled = marSelectedArtists.length < 2;
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    const marForm = document.getElementById('multi-artist-radio-form');
+    if (marForm) {
+        marForm.addEventListener('submit', async function(e) {
+            e.preventDefault();
+            if (!checkLibrarySelection()) return;
+            if (marSelectedArtists.length < 2) { showToast('error', 'Please select at least 2 artists'); return; }
+            const btn = document.getElementById('create-mar-playlist-btn');
+            btn.disabled = true;
+            showToast('loading', 'Creating your Artist Radio blend...', 0);
+            try {
+                const refreshFrequency = document.querySelector('input[name="mar-refresh-frequency"]:checked').value;
+                const playlistLength = parseInt(document.querySelector('input[name="mar-playlist-length"]:checked').value);
+                const response = await fetchWithTimeout('/api/create-multi-artist-radio', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ artist_ids: marSelectedArtists.map(a => a.id), refresh_frequency: refreshFrequency, playlist_length: playlistLength, library_ids: selectedLibraryIds })
+                });
+                if (!response.ok) { const err = await response.json().catch(() => ({ detail: 'Unknown error' })); throw new Error(err.detail || 'Failed'); }
+                const data = await response.json();
+                showToast('success', `Artist Radio created with ${data.songs ? data.songs.length : playlistLength} tracks`);
+                updatePlaylistCount();
+            } catch (error) { showToast('error', error.message); }
+            finally { btn.disabled = marSelectedArtists.length < 2; }
+        });
+    }
+});
+
+// ============================================================
+// MULTI-GENRE MIX
+// ============================================================
+
+async function loadGenresForMGM() {
+    if (allGenres.length === 0) {
+        try {
+            const url = selectedLibraryIds.length > 0
+                ? `/api/genres?library_ids=${selectedLibraryIds.join(',')}`
+                : '/api/genres';
+            const response = await fetch(url);
+            if (response.ok) allGenres = await response.json();
+        } catch (e) { console.error('Failed to load genres for MGM:', e); return; }
+    }
+    const container = document.getElementById('mgm-genre-chips');
+    const loading = document.getElementById('mgm-genre-loading');
+    if (!container) return;
+    if (loading) loading.remove();
+    container.querySelectorAll('.mgm-chip').forEach(c => c.remove());
+    allGenres.forEach(genre => {
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'mgm-chip px-3 py-1 rounded-full text-sm border border-gray-300 bg-white text-gray-700 hover:border-blue-400 hover:text-blue-700 transition-colors';
+        chip.setAttribute('data-genre', genre.name);
+        chip.textContent = genre.name;
+        chip.addEventListener('click', () => toggleMGMGenre(genre.name, chip));
+        container.appendChild(chip);
+    });
+}
+
+function toggleMGMGenre(genreName, chipEl) {
+    const idx = mgmSelectedGenres.indexOf(genreName);
+    if (idx >= 0) {
+        mgmSelectedGenres.splice(idx, 1);
+        chipEl.classList.remove('border-blue-500', 'bg-blue-50', 'text-blue-700');
+        chipEl.classList.add('border-gray-300', 'bg-white', 'text-gray-700');
+    } else {
+        if (mgmSelectedGenres.length >= 5) { showToast('error', 'Maximum 5 genres allowed'); return; }
+        mgmSelectedGenres.push(genreName);
+        chipEl.classList.add('border-blue-500', 'bg-blue-50', 'text-blue-700');
+        chipEl.classList.remove('border-gray-300', 'bg-white', 'text-gray-700');
+    }
+    const countEl = document.getElementById('mgm-genre-count');
+    if (countEl) countEl.textContent = mgmSelectedGenres.length;
+    const btn = document.getElementById('create-mgm-playlist-btn');
+    if (btn) btn.disabled = mgmSelectedGenres.length < 2;
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    const mgmForm = document.getElementById('multi-genre-mix-form');
+    if (mgmForm) {
+        mgmForm.addEventListener('submit', async function(e) {
+            e.preventDefault();
+            if (!checkLibrarySelection()) return;
+            if (mgmSelectedGenres.length < 2) { showToast('error', 'Please select at least 2 genres'); return; }
+            const btn = document.getElementById('create-mgm-playlist-btn');
+            btn.disabled = true;
+            showToast('loading', 'Creating your Multi Genre Mix...', 0);
+            try {
+                const refreshFrequency = document.querySelector('input[name="mgm-refresh-frequency"]:checked').value;
+                const playlistLength = parseInt(document.querySelector('input[name="mgm-playlist-length"]:checked').value);
+                const response = await fetchWithTimeout('/api/create-multi-genre-mix', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ genres: mgmSelectedGenres, refresh_frequency: refreshFrequency, playlist_length: playlistLength, library_ids: selectedLibraryIds, discovery_ratio: parseFloat(document.getElementById('mgm-discovery-ratio').value) / 100 })
+                });
+                if (!response.ok) { const err = await response.json().catch(() => ({ detail: 'Unknown error' })); throw new Error(err.detail || 'Failed'); }
+                const data = await response.json();
+                showToast('success', `Multi Genre Mix created with ${data.songs ? data.songs.length : playlistLength} tracks`);
+                updatePlaylistCount();
+            } catch (error) { showToast('error', error.message); }
+            finally { btn.disabled = mgmSelectedGenres.length < 2; }
+        });
+    }
+});
+
+// ============================================================
+// DECADE DISCOVERY
+// ============================================================
+
+const DECADE_OPTIONS = ['60s', '70s', '80s', '90s', '00s', '10s', '20s'];
+
+function initDecadeChips() {
+    const container = document.getElementById('dd-decade-chips');
+    if (!container || container.querySelectorAll('.dd-chip').length > 0) return;
+    DECADE_OPTIONS.forEach(decade => {
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'dd-chip px-4 py-2 rounded-full text-sm border border-gray-300 bg-white text-gray-700 hover:border-blue-400 hover:text-blue-700 transition-colors';
+        chip.setAttribute('data-decade', decade);
+        chip.textContent = decade;
+        chip.addEventListener('click', () => toggleDDDecade(decade, chip));
+        container.appendChild(chip);
+    });
+}
+
+function toggleDDDecade(decade, chipEl) {
+    const idx = ddSelectedDecades.indexOf(decade);
+    if (idx >= 0) {
+        ddSelectedDecades.splice(idx, 1);
+        chipEl.classList.remove('border-blue-500', 'bg-blue-50', 'text-blue-700');
+        chipEl.classList.add('border-gray-300', 'bg-white', 'text-gray-700');
+    } else {
+        ddSelectedDecades.push(decade);
+        chipEl.classList.add('border-blue-500', 'bg-blue-50', 'text-blue-700');
+        chipEl.classList.remove('border-gray-300', 'bg-white', 'text-gray-700');
+    }
+    const btn = document.getElementById('create-dd-playlist-btn');
+    if (btn) btn.disabled = ddSelectedDecades.length === 0;
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    // Dim the Discovery Mode slider for Decade & Discovery when "Discovery" mode is
+    // selected, because that mode bypasses the tiered pool entirely.
+    function updateDDSliderVisibility(mode) {
+        const wrapper = document.getElementById('dd-discovery-ratio')?.parentElement;
+        if (!wrapper) return;
+        const bypassed = mode === 'Discovery';
+        wrapper.style.opacity = bypassed ? '0.35' : '';
+        wrapper.style.pointerEvents = bypassed ? 'none' : '';
+        wrapper.title = bypassed ? 'Discovery mode sends all era tracks to AI — this slider has no effect' : '';
+    }
+    document.querySelectorAll('input[name="dd-mode"]').forEach(r => {
+        r.addEventListener('change', () => updateDDSliderVisibility(r.value));
+    });
+
+    const ddForm = document.getElementById('decade-discovery-form');
+    if (ddForm) {
+        ddForm.addEventListener('submit', async function(e) {
+            e.preventDefault();
+            if (!checkLibrarySelection()) return;
+            if (ddSelectedDecades.length === 0) { showToast('error', 'Please select at least one decade'); return; }
+            const btn = document.getElementById('create-dd-playlist-btn');
+            btn.disabled = true;
+            showToast('loading', 'Creating your Decade playlist...', 0);
+            try {
+                const mode = document.querySelector('input[name="dd-mode"]:checked').value;
+                const refreshFrequency = document.querySelector('input[name="dd-refresh-frequency"]:checked').value;
+                const playlistLength = parseInt(document.querySelector('input[name="dd-playlist-length"]:checked').value);
+                const response = await fetchWithTimeout('/api/create-decade-discovery', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ decades: ddSelectedDecades, mode: mode, refresh_frequency: refreshFrequency, playlist_length: playlistLength, library_ids: selectedLibraryIds, discovery_ratio: parseFloat(document.getElementById('dd-discovery-ratio').value) / 100 })
+                });
+                if (!response.ok) { const err = await response.json().catch(() => ({ detail: 'Unknown error' })); throw new Error(err.detail || 'Failed'); }
+                const data = await response.json();
+                showToast('success', `Decade playlist created with ${data.songs ? data.songs.length : playlistLength} tracks`);
+                updatePlaylistCount();
+            } catch (error) { showToast('error', error.message); }
+            finally { btn.disabled = ddSelectedDecades.length === 0; }
+        });
+    }
+});
+
+// ============================================================
+// SONIC JOURNEY
+// ============================================================
+
+async function loadArtistsForSJ() {
+    if (allArtists.length === 0) {
+        try {
+            const url = selectedLibraryIds.length > 0
+                ? `/api/artists?library_ids=${selectedLibraryIds.join(',')}`
+                : '/api/artists';
+            const response = await fetch(url);
+            if (response.ok) allArtists = await response.json();
+        } catch (e) { console.error('Failed to load artists for SJ:', e); return; }
+    }
+    ['sj-start-artist-select', 'sj-end-artist-select'].forEach(selectId => {
+        const select = document.getElementById(selectId);
+        if (!select) return;
+        while (select.options.length > 1) select.remove(1);
+        allArtists.forEach(artist => {
+            const opt = document.createElement('option');
+            opt.value = artist.id;
+            opt.textContent = artist.name;
+            select.appendChild(opt);
+        });
+    });
+    const startSel = document.getElementById('sj-start-artist-select');
+    const endSel = document.getElementById('sj-end-artist-select');
+    if (startSel) startSel.onchange = function() { sjStartArtistId = this.value || null; updateSJSubmitButton(); };
+    if (endSel) endSel.onchange = function() { sjEndArtistId = this.value || null; updateSJSubmitButton(); };
+}
+
+function updateSJSubmitButton() {
+    const btn = document.getElementById('create-sj-playlist-btn');
+    if (btn) btn.disabled = !(sjStartArtistId && sjEndArtistId && sjStartArtistId !== sjEndArtistId);
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    const sjForm = document.getElementById('sonic-journey-form');
+    if (sjForm) {
+        sjForm.addEventListener('submit', async function(e) {
+            e.preventDefault();
+            if (!checkLibrarySelection()) return;
+            if (!sjStartArtistId || !sjEndArtistId) { showToast('error', 'Please select both a start and end artist'); return; }
+            if (sjStartArtistId === sjEndArtistId) { showToast('error', 'Start and end artists must be different'); return; }
+            const btn = document.getElementById('create-sj-playlist-btn');
+            btn.disabled = true;
+            showToast('loading', 'Building your Sonic Journey — this may take a moment...', 0);
+            try {
+                const refreshFrequency = document.querySelector('input[name="sj-refresh-frequency"]:checked').value;
+                const playlistLength = parseInt(document.querySelector('input[name="sj-playlist-length"]:checked').value);
+                const response = await fetchWithTimeout('/api/create-sonic-journey', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ start_artist_id: sjStartArtistId, end_artist_id: sjEndArtistId, refresh_frequency: refreshFrequency, playlist_length: playlistLength, library_ids: selectedLibraryIds, discovery_ratio: parseFloat(document.getElementById('sj-discovery-ratio').value) / 100 })
+                });
+                if (!response.ok) { const err = await response.json().catch(() => ({ detail: 'Unknown error' })); throw new Error(err.detail || 'Failed'); }
+                const data = await response.json();
+                showToast('success', `Sonic Journey created with ${data.songs ? data.songs.length : playlistLength} tracks`);
+                updatePlaylistCount();
+            } catch (error) { showToast('error', error.message); }
+            finally { updateSJSubmitButton(); }
+        });
+    }
+});
+
+// ============================================================
+// GENRE ARCHAEOLOGY
+// ============================================================
+
+async function loadGenresForGA() {
+    if (allGenres.length === 0) {
+        try {
+            const url = selectedLibraryIds.length > 0
+                ? `/api/genres?library_ids=${selectedLibraryIds.join(',')}`
+                : '/api/genres';
+            const response = await fetch(url);
+            if (response.ok) allGenres = await response.json();
+        } catch (e) { console.error('Failed to load genres for GA:', e); return; }
+    }
+    const select = document.getElementById('ga-genre-select');
+    if (!select) return;
+    while (select.options.length > 1) select.remove(1);
+    allGenres.forEach(genre => {
+        const opt = document.createElement('option');
+        opt.value = genre.name;
+        opt.textContent = `${genre.name} (${genre.songCount})`;
+        select.appendChild(opt);
+    });
+    select.onchange = function() {
+        gaSelectedGenre = this.value || null;
+        const btn = document.getElementById('create-ga-playlist-btn');
+        if (btn) btn.disabled = !gaSelectedGenre;
+    };
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    // Dim the Discovery Mode slider for Genre Archaeology when "Deep" dig depth is
+    // selected, because that mode bypasses the tiered pool entirely.
+    function updateGASliderVisibility(depth) {
+        const wrapper = document.getElementById('ga-discovery-ratio')?.parentElement;
+        if (!wrapper) return;
+        const bypassed = depth === 'Deep';
+        wrapper.style.opacity = bypassed ? '0.35' : '';
+        wrapper.style.pointerEvents = bypassed ? 'none' : '';
+        wrapper.title = bypassed ? 'Deep dig sends all genre tracks to AI — this slider has no effect' : '';
+    }
+    document.querySelectorAll('input[name="ga-dig-depth"]').forEach(r => {
+        r.addEventListener('change', () => updateGASliderVisibility(r.value));
+    });
+
+    const gaForm = document.getElementById('genre-archaeology-form');
+    if (gaForm) {
+        gaForm.addEventListener('submit', async function(e) {
+            e.preventDefault();
+            if (!checkLibrarySelection()) return;
+            if (!gaSelectedGenre) { showToast('error', 'Please select a genre'); return; }
+            const btn = document.getElementById('create-ga-playlist-btn');
+            btn.disabled = true;
+            showToast('loading', 'Digging through your genre history...', 0);
+            try {
+                const digDepth = document.querySelector('input[name="ga-dig-depth"]:checked').value;
+                const refreshFrequency = document.querySelector('input[name="ga-refresh-frequency"]:checked').value;
+                const playlistLength = parseInt(document.querySelector('input[name="ga-playlist-length"]:checked').value);
+                const response = await fetchWithTimeout('/api/create-genre-archaeology', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ genre: gaSelectedGenre, dig_depth: digDepth, refresh_frequency: refreshFrequency, playlist_length: playlistLength, library_ids: selectedLibraryIds, discovery_ratio: parseFloat(document.getElementById('ga-discovery-ratio').value) / 100 })
+                });
+                if (!response.ok) { const err = await response.json().catch(() => ({ detail: 'Unknown error' })); throw new Error(err.detail || 'Failed'); }
+                const data = await response.json();
+                showToast('success', `Archaeology playlist created with ${data.songs ? data.songs.length : playlistLength} tracks`);
+                updatePlaylistCount();
+            } catch (error) { showToast('error', error.message); }
+            finally { btn.disabled = !gaSelectedGenre; }
+        });
+    }
+});
