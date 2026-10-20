@@ -71,6 +71,12 @@ class DatabaseManager:
                 # Column already exists or other error - ignore
                 pass
 
+            # Add songs_history column for rolling refresh deduplication (last 4 snapshots)
+            try:
+                await db.execute("ALTER TABLE playlists ADD COLUMN songs_history TEXT DEFAULT '[]'")
+            except:
+                pass
+
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS scheduled_playlists (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -308,7 +314,8 @@ class DatabaseManager:
                     sp.next_refresh,
                     sp.playlist_type,
                     p.playlist_length,
-                    p.discovery_ratio
+                    p.discovery_ratio,
+                    p.songs_history
                 FROM playlists p
                 LEFT JOIN scheduled_playlists sp ON p.navidrome_playlist_id = sp.navidrome_playlist_id
                 WHERE p.id = ?
@@ -330,6 +337,7 @@ class DatabaseManager:
                         "playlist_type": row[10],
                         "playlist_length": row[11],
                         "discovery_ratio": row[12] if row[12] is not None else 0.25,
+                        "songs_history": json.loads(row[13]) if row[13] else [],
                     }
 
         return None
@@ -353,7 +361,8 @@ class DatabaseManager:
                     sp.next_refresh,
                     sp.playlist_type,
                     p.playlist_length,
-                    p.discovery_ratio
+                    p.discovery_ratio,
+                    p.songs_history
                 FROM playlists p
                 LEFT JOIN scheduled_playlists sp ON p.navidrome_playlist_id = sp.navidrome_playlist_id
                 WHERE p.navidrome_playlist_id = ?
@@ -375,6 +384,7 @@ class DatabaseManager:
                         "playlist_type": row[10],
                         "playlist_length": row[11],
                         "discovery_ratio": row[12] if row[12] is not None else 0.25,
+                        "songs_history": json.loads(row[13]) if row[13] else [],
                     }
         return None
 
@@ -470,10 +480,10 @@ class DatabaseManager:
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute("""
                 SELECT id, playlist_type, navidrome_playlist_id, refresh_frequency, next_refresh, created_at, updated_at
-                FROM scheduled_playlists 
-                WHERE next_refresh <= ? AND next_refresh >= ?
+                FROM scheduled_playlists
+                WHERE next_refresh <= ?
                 ORDER BY next_refresh ASC
-            """, (current_time.isoformat(), grace_cutoff.isoformat())) as cursor:
+            """, (current_time.isoformat(),)) as cursor:
                 rows = await cursor.fetchall()
                 
                 for row in rows:
@@ -519,18 +529,32 @@ class DatabaseManager:
             return cursor.rowcount > 0
     
     async def update_playlist_content(self, navidrome_playlist_id: str, songs: List[str], reasoning: Optional[str] = None) -> bool:
-        """Update the songs and reasoning for a playlist during refresh"""
+        """Update songs/reasoning and roll the songs_history (keeps last 4 snapshots)"""
         await self.init_db()
-        
-        songs_json = json.dumps(songs)
-        
+
         async with aiosqlite.connect(self.db_path) as db:
+            # Read current songs to push into history before overwriting
+            async with db.execute(
+                "SELECT songs, songs_history FROM playlists WHERE navidrome_playlist_id = ?",
+                (navidrome_playlist_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+
+            current_songs: List[str] = json.loads(row[0]) if row and row[0] else []
+            history: List[List[str]] = json.loads(row[1]) if row and row[1] else []
+
+            # Prepend current snapshot and keep last 4
+            if current_songs:
+                history = [current_songs] + history
+                history = history[:4]
+
             cursor = await db.execute("""
-                UPDATE playlists 
-                SET songs = ?, reasoning = ?, last_refreshed = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+                UPDATE playlists
+                SET songs = ?, songs_history = ?, reasoning = ?,
+                    last_refreshed = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
                 WHERE navidrome_playlist_id = ?
-            """, (songs_json, reasoning, navidrome_playlist_id))
-            
+            """, (json.dumps(songs), json.dumps(history), reasoning, navidrome_playlist_id))
+
             await db.commit()
             return cursor.rowcount > 0
     

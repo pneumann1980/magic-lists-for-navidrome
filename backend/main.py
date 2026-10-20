@@ -1322,12 +1322,9 @@ def calculate_next_refresh(frequency: str) -> datetime:
         next_day = now + timedelta(days=1)
         return next_day.replace(hour=1, minute=0, second=0, microsecond=0)
     elif frequency == "weekly":
-        # Next Monday at 1:00 AM
-        days_until_monday = (7 - now.weekday()) % 7
-        if days_until_monday == 0 and now.hour >= 1:
-            days_until_monday = 7  # If it's Monday after 1 AM, go to next Monday
-        next_monday = now + timedelta(days=days_until_monday)
-        return next_monday.replace(hour=1, minute=0, second=0, microsecond=0)
+        # 7 days from now at 1:00 AM
+        next_week = now + timedelta(days=7)
+        return next_week.replace(hour=1, minute=0, second=0, microsecond=0)
     elif frequency == "monthly":
         # 1st of next month at 1:00 AM
         if now.month == 12:
@@ -1448,12 +1445,12 @@ def schedule_playlist_refresh():
         scheduler.add_job(
             refresh_scheduled_playlists,
             'cron',
-            hour='1,13',  # Run at 1 AM and 1 PM
-            minute=1,     # Run at 1 minute past (1:01 AM and 1:01 PM)
+            hour='*',   # Run every hour
+            minute=1,   # Run at 1 minute past each hour
             id='playlist_refresh',
             replace_existing=True
         )
-        scheduler_logger.info("🔄 Playlist refresh job scheduled to run every 12 hours (1:01 AM and 1:01 PM)")
+        scheduler_logger.info("🔄 Playlist refresh job scheduled to run every hour (at :01)")
 
 async def refresh_scheduled_playlists():
     """Check for and refresh scheduled playlists that are due"""
@@ -1553,7 +1550,15 @@ async def refresh_rediscover_playlist(scheduled_playlist, db: DatabaseManager):
         
         # Get previous playlist songs for variety context
         previous_songs = original_playlist.get("songs", [])[:10]
-        variety_instruction = f"REFRESH CHALLENGE: The current playlist opens with these tracks in this order: {', '.join(previous_songs[:5])}. Your goal is to create a FRESH arrangement that tells a different musical story. You may include some of the same excellent tracks if they're rediscovery-worthy, but avoid replicating the same opening sequence or overall flow. Think creatively about re-ordering, substituting, or finding better transitions to ensure a genuinely refreshed listening experience." if previous_songs else ""
+        if previous_songs:
+            sample_titles = ", ".join(f'"{t}"' for t in previous_songs[:5])
+            variety_instruction = (
+                f"REFRESH CHALLENGE: The current playlist includes tracks like: {sample_titles}. "
+                f"Your goal is to create a FRESH arrangement that tells a different musical story. "
+                f"Avoid repeating these tracks and vary the mood, era mix, and flow significantly."
+            )
+        else:
+            variety_instruction = ""
         
         # Get AI client for v2.0 processor
         ai_client = get_ai_client()
@@ -1697,25 +1702,31 @@ async def refresh_this_is_playlist(scheduled_playlist, db: DatabaseManager):
                 scheduler_logger.warning(f"⚠️ Artist only has {len(tracks)} tracks, but user requested {original_length}. Using all available tracks.")
                 original_length = len(tracks)
             
-            # Get previous playlist songs for variety enforcement
+            # Build exclusion set from current songs + rolling history (last 4 snapshots)
             previous_songs = original_playlist.get("songs", [])
-            previous_titles = set(previous_songs)
+            songs_history = original_playlist.get("songs_history", [])
+            all_previous: set = set(previous_songs)
+            for snapshot in songs_history:
+                all_previous.update(snapshot)
 
             # Exclude previously used tracks at the data layer when there are
             # enough remaining tracks to still fill the playlist.
-            tracks_without_previous = [t for t in tracks if t.get("title", "") not in previous_titles]
+            tracks_without_previous = [t for t in tracks if t.get("title", "") not in all_previous]
             if len(tracks_without_previous) >= original_length:
                 tracks_for_ai = tracks_without_previous
-                scheduler_logger.info(f"🔄 Excluded {len(tracks) - len(tracks_without_previous)} previously-used tracks; {len(tracks_for_ai)} remaining")
+                scheduler_logger.info(f"🔄 Excluded {len(tracks) - len(tracks_without_previous)} previously-used tracks (history depth: {len(songs_history)+1}); {len(tracks_for_ai)} remaining")
             else:
                 tracks_for_ai = tracks.copy()
                 scheduler_logger.info(f"🔄 Library too small to fully exclude previous tracks; using full set of {len(tracks_for_ai)}")
 
-            variety_instruction = (
-                f"REFRESH: This replaces a previous playlist. Keep the listening experience fresh — "
-                f"vary the mood, era mix, and track sequence significantly from last time."
-                if previous_songs else "Create a fresh, engaging playlist arrangement."
-            )
+            if previous_songs:
+                sample_titles = ", ".join(f'"{t}"' for t in previous_songs[:8])
+                variety_instruction = (
+                    f"REFRESH: This replaces a previous playlist. Avoid repeating these tracks from last time: {sample_titles}. "
+                    f"Keep the listening experience fresh — vary the mood, era mix, and track sequence significantly."
+                )
+            else:
+                variety_instruction = "Create a fresh, engaging playlist arrangement."
             
             # Use AI to curate a FRESH playlist with STRONG variety enforcement
             curation_result = await ai_client_instance.curate_this_is(
@@ -1831,13 +1842,16 @@ async def refresh_genre_mix_playlist(scheduled_playlist, db: DatabaseManager):
             scheduler_logger.warning(f"⚠️ Genre only has {len(all_tracks)} tracks, but user requested {original_length}. Using all available tracks.")
             original_length = len(all_tracks)
 
-        # Exclude previously used tracks at the data layer when library is large enough
+        # Build exclusion set from current songs + rolling history (last 4 snapshots)
         previous_songs = original_playlist.get("songs", [])
-        previous_titles = set(previous_songs)
-        tracks_without_previous = [t for t in all_tracks if t.get("title", "") not in previous_titles]
+        songs_history = original_playlist.get("songs_history", [])
+        all_previous: set = set(previous_songs)
+        for snapshot in songs_history:
+            all_previous.update(snapshot)
+        tracks_without_previous = [t for t in all_tracks if t.get("title", "") not in all_previous]
         if len(tracks_without_previous) >= original_length:
             candidate_tracks = tracks_without_previous
-            scheduler_logger.info(f"🔄 Excluded {len(all_tracks) - len(tracks_without_previous)} previously-used tracks; {len(candidate_tracks)} remaining")
+            scheduler_logger.info(f"🔄 Excluded {len(all_tracks) - len(tracks_without_previous)} previously-used tracks (history depth: {len(songs_history)+1}); {len(candidate_tracks)} remaining")
         else:
             candidate_tracks = all_tracks
             scheduler_logger.info(f"🔄 Library too small to fully exclude previous tracks; using full set of {len(candidate_tracks)}")
@@ -1849,7 +1863,14 @@ async def refresh_genre_mix_playlist(scheduled_playlist, db: DatabaseManager):
         filtered_tracks, pool_meta = build_tiered_pool(candidate_tracks, pool_size, stored_discovery_ratio, library_stats)
         scheduler_logger.info(f"🎯 Tiered pool (refresh genre_mix): {pool_meta.get('source_count', len(candidate_tracks))} → {pool_meta.get('sent_count', len(filtered_tracks))} tracks (discovery={stored_discovery_ratio:.0%})")
 
-        variety_instruction = "REFRESH: Keep the listening experience fresh — vary the mood, era mix, and track sequence significantly from last time." if previous_songs else "Create a fresh, engaging playlist arrangement."
+        if previous_songs:
+            sample_titles = ", ".join(f'"{t}"' for t in previous_songs[:8])
+            variety_instruction = (
+                f"REFRESH: Avoid repeating these tracks from last time: {sample_titles}. "
+                f"Keep the listening experience fresh — vary the mood, era mix, and track sequence significantly."
+            )
+        else:
+            variety_instruction = "Create a fresh, engaging playlist arrangement."
         variety_instruction += "\n" + _discovery_hint(stored_discovery_ratio)
 
         curation_result = await ai_client_instance.curate_genre_mix(
@@ -1958,14 +1979,21 @@ async def refresh_multi_artist_radio_playlist(scheduled_playlist, db: DatabaseMa
 
         original_length = original_playlist.get("playlist_length", 30)
         previous_songs = original_playlist.get("songs", [])
-        previous_titles = set(previous_songs)
-        tracks_without_previous = [t for t in all_tracks if t.get("title", "") not in previous_titles]
+        songs_history = original_playlist.get("songs_history", [])
+        all_previous: set = set(previous_songs)
+        for _snap in songs_history:
+            all_previous.update(_snap)
+        tracks_without_previous = [t for t in all_tracks if t.get("title", "") not in all_previous]
         candidate_tracks = tracks_without_previous if len(tracks_without_previous) >= original_length else all_tracks
         stored_discovery_ratio = original_playlist.get("discovery_ratio", 0.15)
         library_stats = await nav_client.get_library_stats()
         pool_size = original_length * calculate_filter_threshold(original_length)
         filtered_tracks, _ = build_tiered_pool(candidate_tracks, pool_size, stored_discovery_ratio, library_stats)
-        refresh_hint = "REFRESH: Keep the selection fresh — vary mood, tempo, and track order significantly." if previous_songs else ""
+        if previous_songs:
+            sample_titles = ", ".join(f'"{t}"' for t in previous_songs[:8])
+            refresh_hint = f"REFRESH: Avoid repeating these tracks from last time: {sample_titles}. Keep the selection fresh — vary mood, tempo, and track order significantly."
+        else:
+            refresh_hint = ""
         variety_context = (refresh_hint + "\n" + _discovery_hint(stored_discovery_ratio)).strip() or None
 
         curation_result = await ai_client_instance.curate_multi_artist_radio(
@@ -2023,14 +2051,21 @@ async def refresh_multi_genre_mix_playlist(scheduled_playlist, db: DatabaseManag
 
         original_length = original_playlist.get("playlist_length", 30)
         previous_songs = original_playlist.get("songs", [])
-        previous_titles = set(previous_songs)
-        tracks_without_previous = [t for t in all_tracks if t.get("title", "") not in previous_titles]
+        songs_history = original_playlist.get("songs_history", [])
+        all_previous: set = set(previous_songs)
+        for _snap in songs_history:
+            all_previous.update(_snap)
+        tracks_without_previous = [t for t in all_tracks if t.get("title", "") not in all_previous]
         candidate_tracks = tracks_without_previous if len(tracks_without_previous) >= original_length else all_tracks
         stored_discovery_ratio = original_playlist.get("discovery_ratio", 0.25)
         library_stats = await nav_client.get_library_stats()
         pool_size = original_length * calculate_filter_threshold(original_length)
         filtered_tracks, _ = build_tiered_pool(candidate_tracks, pool_size, stored_discovery_ratio, library_stats)
-        refresh_hint = "REFRESH: Keep the selection fresh — vary mood, tempo, and track order significantly." if previous_songs else ""
+        if previous_songs:
+            sample_titles = ", ".join(f'"{t}"' for t in previous_songs[:8])
+            refresh_hint = f"REFRESH: Avoid repeating these tracks from last time: {sample_titles}. Keep the selection fresh — vary mood, tempo, and track order significantly."
+        else:
+            refresh_hint = ""
         variety_context = (refresh_hint + "\n" + _discovery_hint(stored_discovery_ratio)).strip() or None
 
         curation_result = await ai_client_instance.curate_multi_genre_mix(
@@ -2090,8 +2125,11 @@ async def refresh_decade_discovery_playlist(scheduled_playlist, db: DatabaseMana
 
         original_length = original_playlist.get("playlist_length", 30)
         previous_songs = original_playlist.get("songs", [])
-        previous_titles = set(previous_songs)
-        tracks_without_previous = [t for t in all_tracks if t.get("title", "") not in previous_titles]
+        songs_history = original_playlist.get("songs_history", [])
+        all_previous: set = set(previous_songs)
+        for _snap in songs_history:
+            all_previous.update(_snap)
+        tracks_without_previous = [t for t in all_tracks if t.get("title", "") not in all_previous]
         candidate_tracks = tracks_without_previous if len(tracks_without_previous) >= original_length else all_tracks
 
         stored_discovery_ratio = original_playlist.get("discovery_ratio", 0.25)
@@ -2102,7 +2140,11 @@ async def refresh_decade_discovery_playlist(scheduled_playlist, db: DatabaseMana
         else:
             tracks_for_llm, _ = build_tiered_pool(candidate_tracks, pool_size, stored_discovery_ratio, library_stats)
 
-        refresh_hint = "REFRESH: Keep the selection fresh — vary mood, era mix, and track order significantly." if previous_songs else ""
+        if previous_songs:
+            sample_titles = ", ".join(f'"{t}"' for t in previous_songs[:8])
+            refresh_hint = f"REFRESH: Avoid repeating these tracks from last time: {sample_titles}. Keep the selection fresh — vary mood, era mix, and track order significantly."
+        else:
+            refresh_hint = ""
         variety_context = (refresh_hint + "\n" + _discovery_hint(stored_discovery_ratio)).strip() or None
 
         curation_result = await ai_client_instance.curate_decade_discovery(
@@ -2160,15 +2202,22 @@ async def refresh_sonic_journey_playlist(scheduled_playlist, db: DatabaseManager
             return
 
         previous_songs = original_playlist.get("songs", [])
-        previous_titles = set(previous_songs)
-        tracks_without_previous = [t for t in all_tracks if t.get("title", "") not in previous_titles]
+        songs_history = original_playlist.get("songs_history", [])
+        all_previous: set = set(previous_songs)
+        for _snap in songs_history:
+            all_previous.update(_snap)
+        tracks_without_previous = [t for t in all_tracks if t.get("title", "") not in all_previous]
         candidate_tracks = tracks_without_previous if len(tracks_without_previous) >= original_length else all_tracks
 
         stored_discovery_ratio = original_playlist.get("discovery_ratio", 0.20)
         library_stats = await nav_client.get_library_stats()
         sj_pool_size = original_length * 4 * calculate_filter_threshold(original_length * 4)
         filtered_tracks, _ = build_tiered_pool(candidate_tracks, sj_pool_size, stored_discovery_ratio, library_stats)
-        refresh_hint = "REFRESH: Keep the selection fresh — vary mood, tempo, and track order significantly." if previous_songs else ""
+        if previous_songs:
+            sample_titles = ", ".join(f'"{t}"' for t in previous_songs[:8])
+            refresh_hint = f"REFRESH: Avoid repeating these tracks from last time: {sample_titles}. Keep the selection fresh — vary mood, tempo, and track order significantly."
+        else:
+            refresh_hint = ""
         variety_context = (refresh_hint + "\n" + _discovery_hint(stored_discovery_ratio)).strip() or None
 
         curation_result = await ai_client_instance.curate_sonic_journey(
@@ -2227,8 +2276,11 @@ async def refresh_genre_archaeology_playlist(scheduled_playlist, db: DatabaseMan
 
         original_length = original_playlist.get("playlist_length", 30)
         previous_songs = original_playlist.get("songs", [])
-        previous_titles = set(previous_songs)
-        tracks_without_previous = [t for t in all_tracks if t.get("title", "") not in previous_titles]
+        songs_history = original_playlist.get("songs_history", [])
+        all_previous: set = set(previous_songs)
+        for _snap in songs_history:
+            all_previous.update(_snap)
+        tracks_without_previous = [t for t in all_tracks if t.get("title", "") not in all_previous]
         candidate_tracks = tracks_without_previous if len(tracks_without_previous) >= original_length else all_tracks
 
         stored_discovery_ratio = original_playlist.get("discovery_ratio", 0.30)
@@ -2239,7 +2291,11 @@ async def refresh_genre_archaeology_playlist(scheduled_playlist, db: DatabaseMan
         else:
             tracks_for_llm, _ = build_tiered_pool(candidate_tracks, pool_size, stored_discovery_ratio, library_stats)
 
-        refresh_hint = "REFRESH: Keep the selection fresh — vary mood, era mix, and track order significantly." if previous_songs else ""
+        if previous_songs:
+            sample_titles = ", ".join(f'"{t}"' for t in previous_songs[:8])
+            refresh_hint = f"REFRESH: Avoid repeating these tracks from last time: {sample_titles}. Keep the selection fresh — vary mood, era mix, and track order significantly."
+        else:
+            refresh_hint = ""
         variety_context = (refresh_hint + "\n" + _discovery_hint(stored_discovery_ratio)).strip() or None
 
         curation_result = await ai_client_instance.curate_genre_archaeology(

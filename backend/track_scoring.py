@@ -396,9 +396,15 @@ def build_tiered_pool(
                 break
         return result
 
-    hits_sample      = _cap_artists(tier_a_sorted, n_a)
-    familiar_sample  = _cap_artists(tier_b_sorted, n_b)
-    discovery_sample = _cap_artists(tier_c,        n_c)
+    # Sample from a wider pool so the same top hits don't dominate every refresh
+    tier_a_pool = tier_a_sorted[:min(n_a * 3, len(tier_a_sorted))]
+    random.shuffle(tier_a_pool)
+    tier_b_pool = tier_b_sorted[:min(n_b * 2, len(tier_b_sorted))]
+    random.shuffle(tier_b_pool)
+
+    hits_sample      = _cap_artists(tier_a_pool, n_a)
+    familiar_sample  = _cap_artists(tier_b_pool, n_b)
+    discovery_sample = _cap_artists(tier_c,       n_c)
 
     # ------------------------------------------------------------------
     # 5. Merge and shuffle so tiers are interleaved in the LLM payload.
