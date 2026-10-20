@@ -61,7 +61,13 @@
                         </a>
                     </div>
                     <div class="flex items-center gap-3">
-                        <span id="ai-budget-badge" class="hidden text-xs font-medium px-2 py-1 rounded-full bg-gray-200 text-gray-600"></span>
+                        <div id="ai-budget-widget" class="hidden flex items-center gap-2" title="Verbleibende KI-Anfragen heute">
+                            <span class="text-xs text-gray-400 select-none">KI</span>
+                            <div class="relative w-20 h-2 rounded-full bg-gray-200 overflow-hidden">
+                                <div id="ai-budget-bar" class="absolute left-0 top-0 h-full rounded-full transition-all duration-700 bg-emerald-500" style="width:100%"></div>
+                            </div>
+                            <span id="ai-budget-text" class="text-xs font-medium tabular-nums text-gray-600">–/–</span>
+                        </div>
                     </div>
                     <div class="mobile-toggle">
                         <button type="button" class="md:hidden hs-collapse-toggle relative size-9 flex justify-center items-center gap-x-2 rounded-lg border border-gray-200 bg-white text-gray-800 shadow-2xs hover:bg-gray-50 focus:outline-hidden focus:bg-gray-50 disabled:opacity-50 disabled:pointer-events-none " id="hs-navbar-alignment-collapse" aria-expanded="false" aria-controls="hs-navbar-alignment" aria-label="Toggle navigation" data-hs-collapse="#hs-navbar-alignment">
