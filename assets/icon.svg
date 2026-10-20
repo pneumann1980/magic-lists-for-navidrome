@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1E1B4B"/>
+      <stop offset="60%" stop-color="#4C1D95"/>
+      <stop offset="100%" stop-color="#6D28D9"/>
+    </linearGradient>
+    <radialGradient id="inner-glow" cx="30%" cy="25%" r="60%">
+      <stop offset="0%" stop-color="#7C3AED" stop-opacity="0.4"/>
+      <stop offset="100%" stop-color="#1E1B4B" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="note-shadow" x="-5%" y="-5%" width="110%" height="110%">
+      <feDropShadow dx="0" dy="2" stdDeviation="6" flood-color="#0000003a"/>
+    </filter>
+    <filter id="star-glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="8" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background rounded square -->
+  <rect width="512" height="512" rx="110" fill="url(#bg)"/>
+  <rect width="512" height="512" rx="110" fill="url(#inner-glow)"/>
+
+  <!-- ── Music note (eighth note) ────────────────────────────────── -->
+  <!-- Note head: tilted filled ellipse -->
+  <ellipse cx="178" cy="352" rx="58" ry="42"
+           transform="rotate(-18 178 352)"
+           fill="white" filter="url(#note-shadow)"/>
+  <!-- Stem -->
+  <rect x="228" y="148" width="24" height="220" rx="12" fill="white"/>
+  <!-- Flag / beam -->
+  <path d="M252 148 C330 178, 348 218, 310 280"
+        stroke="white" stroke-width="24" fill="none"
+        stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- ── Large magic sparkle star (upper-right) ─────────────────── -->
+  <g transform="translate(370, 120)" filter="url(#star-glow)">
+    <!-- 4-pointed star -->
+    <path d="M0,-52 L13,-13 L52,0 L13,13 L0,52 L-13,13 L-52,0 L-13,-13 Z"
+          fill="#F59E0B"/>
+    <!-- Bright center highlight -->
+    <circle cx="0" cy="0" r="10" fill="#FEF3C7" opacity="0.9"/>
+  </g>
+
+  <!-- ── Medium sparkle (right mid) ─────────────────────────────── -->
+  <g transform="translate(378, 290)">
+    <path d="M0,-26 L6.5,-6.5 L26,0 L6.5,6.5 L0,26 L-6.5,6.5 L-26,0 L-6.5,-6.5 Z"
+          fill="#FCD34D" opacity="0.85"/>
+  </g>
+
+  <!-- ── Small accent dots ───────────────────────────────────────── -->
+  <circle cx="138" cy="160" r="11" fill="#FDE68A" opacity="0.55"/>
+  <circle cx="350" cy="195" r="7"  fill="#FDE68A" opacity="0.60"/>
+  <circle cx="320" cy="370" r="9"  fill="#FCD34D" opacity="0.50"/>
+  <circle cx="155" cy="430" r="6"  fill="#FDE68A" opacity="0.40"/>
+
+  <!-- ── Tiny 4-pointed star (lower-right) ──────────────────────── -->
+  <g transform="translate(330, 410)">
+    <path d="M0,-16 L4,-4 L16,0 L4,4 L0,16 L-4,4 L-16,0 L-4,-4 Z"
+          fill="#F59E0B" opacity="0.70"/>
+  </g>
+</svg>
