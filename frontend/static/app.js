@@ -384,7 +384,30 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // Check database connectivity
     checkDatabaseConnectivity();
+
+    // Load AI budget indicator
+    loadAiBudget();
 });
+
+async function loadAiBudget() {
+    try {
+        const res = await fetch('/api/ai-budget');
+        if (!res.ok) return;
+        const data = await res.json();
+        const badge = document.getElementById('ai-budget-badge');
+        if (!badge) return;
+        const { used, limit, remaining } = data;
+        badge.textContent = `KI ${remaining}/${limit} verbleibend`;
+        badge.classList.remove('hidden', 'bg-gray-200', 'text-gray-600', 'bg-amber-100', 'text-amber-700', 'bg-red-100', 'text-red-700');
+        if (remaining <= 0) {
+            badge.classList.add('bg-red-100', 'text-red-700');
+        } else if (remaining <= 3) {
+            badge.classList.add('bg-amber-100', 'text-amber-700');
+        } else {
+            badge.classList.add('bg-gray-200', 'text-gray-600');
+        }
+    } catch (_) { /* silently ignore */ }
+}
 
 // Load artists and populate the select (from original working code)
 async function loadArtists() {
@@ -1384,6 +1407,7 @@ async function refreshPlaylistNow(playlistId, playlistName) {
 
         hideToast(toastId);
         showToast('success', `"${playlistName}" has been refreshed successfully!`);
+        loadAiBudget();
 
         // Update the "last refreshed" label by reloading playlist list
         loadPlaylists();
