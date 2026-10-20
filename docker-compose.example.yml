@@ -1,0 +1,65 @@
+# ============================================================
+# Magic Lists for Navidrome — End-User Compose Template
+# ============================================================
+# 1. Copy this file to docker-compose.yml in a new folder
+# 2. Fill in your Navidrome URL, credentials and AI API key
+# 3. Run:  docker compose up -d
+#
+# Watchtower (included below) checks Docker Hub once a day
+# and pulls the latest image automatically — no manual updates needed.
+# ============================================================
+
+services:
+  magiclists:
+    image: rickysynnot/magic-lists-for-navidrome:latest
+    container_name: magiclists
+    restart: unless-stopped
+    ports:
+      - "4545:8000"
+    environment:
+      # --- Navidrome connection (required) ---
+      NAVIDROME_URL: "http://your-navidrome-host:4533"
+      NAVIDROME_USERNAME: "admin"
+      NAVIDROME_PASSWORD: "your-navidrome-password"
+
+      # --- AI provider (required) ---
+      # Options: google | openrouter | groq | ollama
+      AI_PROVIDER: "google"
+      AI_API_KEY: "your-google-ai-api-key"
+      # Optional: override the default model
+      # AI_MODEL: "gemini-2.5-flash"
+
+      # --- Database path (keep default unless you know what you're doing) ---
+      DATABASE_PATH: "/app/data/magiclists.db"
+
+      # --- Optional tuning ---
+      # LOG_LEVEL: "INFO"          # DEBUG | INFO | WARNING | ERROR
+      # OLLAMA_BASE_URL: "http://ollama:11434/v1/chat/completions"
+    volumes:
+      - magiclists_data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ----------------------------------------------------------
+  # Watchtower: checks Docker Hub daily and auto-updates
+  # the magiclists container when a new image is available.
+  # Remove this service if you prefer manual updates.
+  # ----------------------------------------------------------
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    # Check once a day (86400 seconds) and only watch this container
+    command: --interval 86400 --cleanup magiclists
+    environment:
+      WATCHTOWER_NOTIFICATION_REPORT: "true"
+
+volumes:
+  magiclists_data:
+    driver: local
