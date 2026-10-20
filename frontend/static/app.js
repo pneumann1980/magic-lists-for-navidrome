@@ -1388,15 +1388,19 @@ async function refreshPlaylistNow(playlistId, playlistName) {
             headers: { 'Content-Type': 'application/json' }
         }, 180000);
 
-        if (response.status === 503) {
+        if (response.status === 503 || response.status === 429) {
             const err = await response.json().catch(() => ({}));
             hideToast(toastId);
-            showToast('warning', err.detail || 'AI service temporarily unavailable — playlist unchanged, retry scheduled in 1 hour.');
+            const msg = response.status === 429
+                ? (err.detail || 'Tages-KI-Budget erschöpft — bitte morgen erneut versuchen.')
+                : (err.detail || 'KI vorübergehend nicht verfügbar — Playlist unverändert, Wiederholung in 1 Stunde geplant.');
+            showToast('warning', msg);
             if (btn) {
                 btn.disabled = false;
                 btn.textContent = originalText;
                 btn.classList.remove('opacity-60', 'cursor-not-allowed');
             }
+            loadAiBudget();
             return;
         }
 

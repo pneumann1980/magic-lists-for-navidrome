@@ -2753,7 +2753,22 @@ async def refresh_playlist_now(playlist_id: int, db: DatabaseManager = Depends(g
         # Clean up any duplicates to keep DB tidy
         await db.delete_duplicate_scheduled_playlists(navidrome_playlist_id)
 
-        scheduler_logger.info(f"🔄 Manual refresh requested for playlist ID: {playlist_id} (type: {playlist_type})")
+        # Check daily AI budget before calling
+        used_today = await db.get_ai_requests_today()
+        remaining = AI_RPD_LIMIT - used_today
+        if remaining <= 0:
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    f"Tages-KI-Budget erschöpft ({used_today}/{AI_RPD_LIMIT} Anfragen). "
+                    "Bitte morgen erneut versuchen oder das AI_RPD_LIMIT erhöhen."
+                )
+            )
+
+        # Respect the rate limit (min 13 s between calls → max ~4.6 RPM)
+        await _ai_rate_limit()
+
+        scheduler_logger.info(f"🔄 Manual refresh requested for playlist ID: {playlist_id} (type: {playlist_type}, budget: {remaining} left today)")
 
         if scheduled.playlist_type in ("rediscover", "rediscover_weekly_v2"):
             await refresh_rediscover_playlist(scheduled, db)
