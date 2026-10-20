@@ -1510,7 +1510,8 @@ async def refresh_playlist_batch(batch: list, db: DatabaseManager) -> None:
                 if not artist:
                     continue
                 all_tracks = await nav_client.get_tracks_by_artist(artist_id, library_ids)
-                context_description = f"'This Is {artist[\"name\"]}' — showcase playlist for {artist[\"name\"]}"
+                _artist_name = artist["name"]
+                context_description = f"'This Is {_artist_name}' — showcase playlist for {_artist_name}"
 
             elif playlist_type == "genre_mix":
                 genre = original_playlist["artist_id"]
