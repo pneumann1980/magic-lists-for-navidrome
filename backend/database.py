@@ -156,6 +156,14 @@ class DatabaseManager:
                 CREATE INDEX IF NOT EXISTS idx_api_cache_expires ON api_cache(expires_at)
             """)
 
+            # AI usage tracking (one row per day, counts RPD consumed)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS ai_usage (
+                    date TEXT PRIMARY KEY,
+                    requests_count INTEGER DEFAULT 0
+                )
+            """)
+
             await db.commit()
     
     async def create_playlist(self, artist_id: str, playlist_name: str, songs: Optional[List[str]] = None, reasoning: Optional[str] = None, navidrome_playlist_id: Optional[str] = None, playlist_length: Optional[int] = None, library_ids: Optional[List[str]] = None, discovery_ratio: Optional[float] = None) -> Optional[Playlist]:
@@ -711,6 +719,29 @@ class DatabaseManager:
             """, (cache_key, cache_value, expires_at.isoformat()))
             await db.commit()
             return True
+
+    async def get_ai_requests_today(self) -> int:
+        """Return the number of AI requests made today."""
+        await self.init_db()
+        today = datetime.now().strftime("%Y-%m-%d")
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT requests_count FROM ai_usage WHERE date = ?", (today,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                return row[0] if row else 0
+
+    async def increment_ai_requests(self, n: int = 1) -> None:
+        """Increment today's AI request counter by n."""
+        await self.init_db()
+        today = datetime.now().strftime("%Y-%m-%d")
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT INTO ai_usage (date, requests_count) VALUES (?, ?) "
+                "ON CONFLICT(date) DO UPDATE SET requests_count = requests_count + ?",
+                (today, n, n),
+            )
+            await db.commit()
 
     async def cleanup_expired_cache(self) -> int:
         """Clean up expired cache entries. Returns number of entries deleted."""
