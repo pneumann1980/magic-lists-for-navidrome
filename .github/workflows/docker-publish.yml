@@ -35,7 +35,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: rickysynnot/magic-lists-for-navidrome
+          images: pneumann1980/magic-lists-for-navidrome
           tags: |
             # latest on every push to main
             type=raw,value=latest,enable={{is_default_branch}}

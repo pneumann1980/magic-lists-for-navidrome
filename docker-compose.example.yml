@@ -11,7 +11,7 @@
 
 services:
   magiclists:
-    image: rickysynnot/magic-lists-for-navidrome:latest
+    image: pneumann1980/magic-lists-for-navidrome:latest
     container_name: magiclists
     restart: unless-stopped
     ports:
