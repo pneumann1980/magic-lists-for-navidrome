@@ -13,9 +13,13 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import asyncio
+import time
 
 # Load environment variables first
 load_dotenv()
+
+# Cache-buster: changes on every container start so browsers fetch fresh static files
+APP_VERSION = os.getenv("GIT_COMMIT", str(int(time.time())))
 
 # Get log level from environment (ERROR=minimal, INFO=normal, DEBUG=verbose)
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -186,13 +190,13 @@ async def read_root(request: Request):
         return RedirectResponse(url="/system-check", status_code=302)
     # SYSTEM CHECK FEATURE - END
     
-    return templates.TemplateResponse(request, "index.html")
+    return templates.TemplateResponse(request, "index.html", {"app_version": APP_VERSION})
 
 # SYSTEM CHECK FEATURE - START
 @app.get("/system-check", response_class=HTMLResponse)
 async def system_check_page(request: Request):
     """Serve the system check page"""
-    return templates.TemplateResponse(request, "index.html")
+    return templates.TemplateResponse(request, "index.html", {"app_version": APP_VERSION})
 # SYSTEM CHECK FEATURE - END
 
 @app.get("/api/artists")
