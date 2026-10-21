@@ -61,12 +61,12 @@
                         </a>
                     </div>
                     <div class="flex items-center gap-3">
-                        <div id="ai-budget-widget" class="hidden flex items-center gap-2" title="Verbleibende KI-Anfragen heute">
+                        <div id="ai-budget-widget" class="flex items-center gap-2" title="Verbleibende KI-Anfragen heute">
                             <span class="text-xs text-gray-400 select-none">KI</span>
-                            <div class="relative w-20 h-2 rounded-full bg-gray-200 overflow-hidden">
-                                <div id="ai-budget-bar" class="absolute left-0 top-0 h-full rounded-full transition-all duration-700 bg-emerald-500" style="width:100%"></div>
+                            <div style="position:relative;width:72px;height:8px;border-radius:999px;background:#e5e7eb;overflow:hidden;">
+                                <div id="ai-budget-bar" style="position:absolute;left:0;top:0;height:100%;width:100%;border-radius:999px;background:#10b981;transition:width 0.7s ease,background 0.4s ease;"></div>
                             </div>
-                            <span id="ai-budget-text" class="text-xs font-medium tabular-nums text-gray-600">–/–</span>
+                            <span id="ai-budget-text" class="text-xs font-medium tabular-nums text-gray-500">…</span>
                         </div>
                     </div>
                     <div class="mobile-toggle">

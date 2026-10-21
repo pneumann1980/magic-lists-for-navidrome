@@ -390,35 +390,19 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 
 async function loadAiBudget() {
+    const bar  = document.getElementById('ai-budget-bar');
+    const text = document.getElementById('ai-budget-text');
+    if (!bar || !text) return;
     try {
         const res = await fetch('/api/ai-budget');
-        if (!res.ok) return;
-        const data = await res.json();
-        const widget = document.getElementById('ai-budget-widget');
-        const bar    = document.getElementById('ai-budget-bar');
-        const text   = document.getElementById('ai-budget-text');
-        if (!widget || !bar || !text) return;
-
-        const { used, limit, remaining } = data;
+        if (!res.ok) { text.textContent = '?'; return; }
+        const { remaining, limit } = await res.json();
         const pct = limit > 0 ? Math.round((remaining / limit) * 100) : 0;
-
-        widget.classList.remove('hidden');
-        bar.style.width = pct + '%';
+        bar.style.width  = pct + '%';
         text.textContent = `${remaining}/${limit}`;
-
-        bar.classList.remove('bg-emerald-500', 'bg-amber-400', 'bg-red-500');
-        text.classList.remove('text-gray-600', 'text-amber-600', 'text-red-600');
-        if (remaining <= 0) {
-            bar.classList.add('bg-red-500');
-            text.classList.add('text-red-600');
-        } else if (remaining <= 3) {
-            bar.classList.add('bg-amber-400');
-            text.classList.add('text-amber-600');
-        } else {
-            bar.classList.add('bg-emerald-500');
-            text.classList.add('text-gray-600');
-        }
-    } catch (_) { /* silently ignore */ }
+        bar.style.background  = remaining <= 0 ? '#ef4444' : remaining <= 3 ? '#f59e0b' : '#10b981';
+        text.style.color      = remaining <= 0 ? '#dc2626' : remaining <= 3 ? '#d97706' : '#6b7280';
+    } catch (_) { text.textContent = '?'; }
 }
 
 // Tracks last AI call time client-side for rate-limit countdown estimate
@@ -1227,11 +1211,11 @@ function renderPlaylists(playlists) {
                             >
                                 Refresh Now
                             </button>
-                            <div id="refresh-progress-${playlist.id}" class="hidden w-full">
-                                <div class="w-full h-1 rounded-full bg-gray-100 overflow-hidden mt-0.5">
-                                    <div id="refresh-bar-${playlist.id}" class="h-full rounded-full transition-none bg-blue-400" style="width:0%"></div>
+                            <div id="refresh-progress-${playlist.id}" style="display:none;width:100%;">
+                                <div style="width:100%;height:4px;border-radius:999px;background:#f3f4f6;overflow:hidden;margin-top:3px;">
+                                    <div id="refresh-bar-${playlist.id}" style="height:100%;border-radius:999px;width:0%;background:#60a5fa;transition:none;"></div>
                                 </div>
-                                <span id="refresh-phase-${playlist.id}" class="text-xs text-gray-400 mt-0.5 block text-right"></span>
+                                <span id="refresh-phase-${playlist.id}" style="font-size:11px;color:#9ca3af;margin-top:2px;display:block;text-align:right;"></span>
                             </div>
                         </div>
                         ` : ''}
@@ -1402,17 +1386,14 @@ async function refreshPlaylistNow(playlistId, playlistName) {
     const originalText = btn ? btn.textContent.trim() : 'Refresh Now';
 
     function setPhase(phase, pct, label) {
-        if (!btn) return;
-        if (phase === 'cooldown') {
-            btn.textContent = `⏱ Warte…`;
-            progBar && progBar.classList.replace('bg-blue-400', 'bg-amber-400') || (progBar && (progBar.className = progBar.className.replace('bg-blue-400','bg-amber-400')));
-        } else if (phase === 'generating') {
-            btn.textContent = '🤖 Generiert…';
-            if (progBar) { progBar.className = progBar.className.replace('bg-amber-400','bg-blue-400'); }
+        if (progWrap) progWrap.style.display = 'block';
+        if (progBar) {
+            progBar.style.transition = pct === 0 ? 'none' : 'width 1s linear';
+            progBar.style.width = pct + '%';
+            progBar.style.background = phase === 'cooldown' ? '#f59e0b' : phase === 'done' ? '#10b981' : '#60a5fa';
         }
-        if (progWrap) progWrap.classList.remove('hidden');
-        if (progBar)  { progBar.style.transition = pct === 0 ? 'none' : 'width 1s linear'; progBar.style.width = pct + '%'; }
         if (progPhase) progPhase.textContent = label;
+        if (btn) btn.textContent = phase === 'cooldown' ? `⏱ Warte…` : phase === 'done' ? '✓ Fertig' : '🤖 Generiert…';
     }
 
     function resetBtn() {
@@ -1421,7 +1402,7 @@ async function refreshPlaylistNow(playlistId, playlistName) {
             btn.textContent = originalText;
             btn.classList.remove('opacity-60', 'cursor-not-allowed');
         }
-        if (progWrap) progWrap.classList.add('hidden');
+        if (progWrap) progWrap.style.display = 'none';
         if (progBar)  { progBar.style.width = '0%'; progBar.style.transition = 'none'; }
         if (progPhase) progPhase.textContent = '';
     }
@@ -1492,9 +1473,7 @@ async function refreshPlaylistNow(playlistId, playlistName) {
         }
 
         // ── Phase 3: Done ────────────────────────────────────────────────
-        if (progBar)  { progBar.style.transition = 'width 0.3s ease'; progBar.style.width = '100%'; }
-        if (progBar)  progBar.classList.replace('bg-blue-400','bg-emerald-500') || (progBar.className = progBar.className.replace('bg-blue-400','bg-emerald-500'));
-        if (progPhase) progPhase.textContent = '✓ Fertig';
+        setPhase('done', 100, '✓ Fertig');
         setTimeout(() => resetBtn(), 1500);
 
         hideToast(toastId);
