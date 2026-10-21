@@ -1525,15 +1525,15 @@ function renderQueueUI() {
                 ? `<p class="text-xs text-amber-700 mb-2">KI-Tagesbudget aufgebraucht (${budget.used}/${budget.limit}) – die Warteliste läuft automatisch weiter, sobald es zurückgesetzt wird (ca. 09:00 Uhr).</p>` : '';
             panel.style.display = '';
             panel.innerHTML = `
-                <div class="flex items-center justify-between mb-2">
+                <div class="flex items-center justify-between gap-2 mb-2">
                     <h2 class="text-base font-semibold text-gray-900 m-0">Warteliste (${q.length})</h2>
                     ${waiting > 0 ? `<button onclick="clearRefreshQueue()" class="text-xs font-medium cursor-pointer border border-red-200 bg-white text-red-600 hover:bg-red-50 rounded px-2 py-1">Alle abbrechen</button>` : ''}
                 </div>
                 ${budgetNote}
                 <ul class="m-0 p-0 list-none space-y-1">
                     ${q.map(item => `
-                    <li class="flex items-center justify-between gap-2 bg-white border border-blue-100 rounded px-2 py-1">
-                        <span class="text-sm text-gray-800 truncate"><span class="text-gray-400 tabular-nums">#${item.position}</span> ${escapeHtmlText(item.name)}
+                    <li class="flex items-center justify-between gap-2 min-w-0 bg-white border border-blue-100 rounded px-2 py-1">
+                        <span class="text-sm text-gray-800 min-w-0 flex-1 break-words"><span class="text-gray-400 tabular-nums">#${item.position}</span> ${escapeHtmlText(item.name)}
                             <span class="text-xs text-gray-500">· ${_queueStatusLabel(item)}</span></span>
                         <span class="flex-none flex gap-1">
                             ${item.status !== 'running' && item.position > 1 ? `<button title="Vorziehen" onclick="prioritizeQueuedRefresh(${item.playlist_id})" class="text-xs cursor-pointer border border-gray-200 bg-white rounded px-2 py-0.5">↑</button>` : ''}
