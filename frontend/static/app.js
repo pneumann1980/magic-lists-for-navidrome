@@ -1203,21 +1203,13 @@ function renderPlaylists(playlists) {
                     </div>
                     <div class="flex-none flex flex-col items-end gap-1 ml-4">
                         ${hasSchedule ? `
-                        <div class="flex flex-col items-end gap-0.5">
-                            <button
-                                id="refresh-btn-${playlist.id}"
-                                onclick="refreshPlaylistNow(${playlist.id}, '${escapedName}')"
-                                class="text-sm font-medium cursor-pointer border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 rounded px-2 py-1 whitespace-nowrap w-full"
-                            >
-                                Refresh Now
-                            </button>
-                            <div id="refresh-progress-${playlist.id}" style="display:none;width:100%;">
-                                <div style="width:100%;height:4px;border-radius:999px;background:#f3f4f6;overflow:hidden;margin-top:3px;">
-                                    <div id="refresh-bar-${playlist.id}" style="height:100%;border-radius:999px;width:0%;background:#60a5fa;transition:none;"></div>
-                                </div>
-                                <span id="refresh-phase-${playlist.id}" style="font-size:11px;color:#9ca3af;margin-top:2px;display:block;text-align:right;"></span>
-                            </div>
-                        </div>
+                        <button
+                            id="refresh-btn-${playlist.id}"
+                            onclick="refreshPlaylistNow(${playlist.id}, '${escapedName}')"
+                            class="text-sm font-medium cursor-pointer border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 rounded px-2 py-1 whitespace-nowrap"
+                        >
+                            Refresh Now
+                        </button>
                         ` : ''}
                         <button
                             onclick="toggleModifyPanel(${playlist.id})"
@@ -1378,72 +1370,89 @@ async function savePlaylistSettings(playlistId) {
     }
 }
 
+// ── Top progress bar helpers ──────────────────────────────────────────────
+function topBarShow(color) {
+    const wrap = document.getElementById('page-progress');
+    const bar  = document.getElementById('page-progress-bar');
+    if (!wrap || !bar) return;
+    wrap.classList.remove('pulse');
+    bar.style.transition = 'none';
+    bar.style.width = '0%';
+    bar.style.background = color;
+    void bar.offsetWidth; // reflow
+}
+function topBarSet(pct, transition) {
+    const bar = document.getElementById('page-progress-bar');
+    if (!bar) return;
+    bar.style.transition = transition || 'width 0.4s ease';
+    bar.style.width = pct + '%';
+}
+function topBarPulse(color) {
+    const wrap = document.getElementById('page-progress');
+    const bar  = document.getElementById('page-progress-bar');
+    if (!wrap || !bar) return;
+    bar.style.background = color;
+    bar.style.transition = 'none';
+    bar.style.width = '30%';
+    void bar.offsetWidth;
+    wrap.classList.add('pulse');
+}
+function topBarDone(color) {
+    const wrap = document.getElementById('page-progress');
+    const bar  = document.getElementById('page-progress-bar');
+    if (!wrap || !bar) return;
+    wrap.classList.remove('pulse');
+    bar.style.transition = 'width 0.25s ease';
+    bar.style.background = color || '#10b981';
+    bar.style.width = '100%';
+    setTimeout(() => {
+        bar.style.transition = 'opacity 0.4s ease';
+        bar.style.opacity = '0';
+        setTimeout(() => { bar.style.width = '0%'; bar.style.opacity = '1'; }, 420);
+    }, 600);
+}
+
 async function refreshPlaylistNow(playlistId, playlistName) {
-    const btn        = document.getElementById(`refresh-btn-${playlistId}`);
-    const progWrap   = document.getElementById(`refresh-progress-${playlistId}`);
-    const progBar    = document.getElementById(`refresh-bar-${playlistId}`);
-    const progPhase  = document.getElementById(`refresh-phase-${playlistId}`);
+    const btn = document.getElementById(`refresh-btn-${playlistId}`);
     const originalText = btn ? btn.textContent.trim() : 'Refresh Now';
 
-    function setPhase(phase, pct, label) {
-        if (progWrap) progWrap.style.display = 'block';
-        if (progBar) {
-            progBar.style.transition = pct === 0 ? 'none' : 'width 1s linear';
-            progBar.style.width = pct + '%';
-            progBar.style.background = phase === 'cooldown' ? '#f59e0b' : phase === 'done' ? '#10b981' : '#60a5fa';
-        }
-        if (progPhase) progPhase.textContent = label;
-        if (btn) btn.textContent = phase === 'cooldown' ? `⏱ Warte…` : phase === 'done' ? '✓ Fertig' : '🤖 Generiert…';
-    }
-
-    function resetBtn() {
-        if (btn) {
-            btn.disabled = false;
-            btn.textContent = originalText;
-            btn.classList.remove('opacity-60', 'cursor-not-allowed');
-        }
-        if (progWrap) progWrap.style.display = 'none';
-        if (progBar)  { progBar.style.width = '0%'; progBar.style.transition = 'none'; }
-        if (progPhase) progPhase.textContent = '';
-    }
-
-    if (btn) {
+    function setBtnPhase(phase, label) {
+        if (!btn) return;
         btn.disabled = true;
-        btn.classList.add('opacity-60', 'cursor-not-allowed');
+        btn.classList.add('opacity-70', 'cursor-not-allowed');
+        btn.classList.toggle('refresh-loading', phase !== 'idle');
+        btn.textContent = label;
+    }
+    function resetBtn() {
+        if (!btn) return;
+        btn.disabled = false;
+        btn.textContent = originalText;
+        btn.classList.remove('opacity-70', 'cursor-not-allowed', 'refresh-loading');
     }
 
-    // ── Phase 1: rate-limit cooldown (client-side estimate) ──────────────
+    // ── Phase 1: rate-limit cooldown (client-side estimate) ─────────────
     const elapsed = Date.now() - _lastAiCallTs;
     const waitMs  = Math.max(0, _AI_COOLDOWN_MS - elapsed);
 
-    let cooldownTimer = null;
     if (waitMs > 0) {
-        setPhase('cooldown', 0, `${Math.ceil(waitMs / 1000)}s…`);
+        topBarShow('#f59e0b');
         const start = Date.now();
         await new Promise(resolve => {
             function tick() {
-                const remaining = Math.max(0, waitMs - (Date.now() - start));
-                const pct = Math.round(((waitMs - remaining) / waitMs) * 100);
-                setPhase('cooldown', pct, remaining > 0 ? `${Math.ceil(remaining / 1000)}s…` : '');
-                if (remaining <= 0) { resolve(); } else { cooldownTimer = setTimeout(tick, 250); }
+                const rem = Math.max(0, waitMs - (Date.now() - start));
+                const pct = Math.round(((waitMs - rem) / waitMs) * 100);
+                topBarSet(pct, 'width 0.25s linear');
+                setBtnPhase('cooldown', `⏱ ${Math.ceil(rem / 1000)}s…`);
+                if (rem <= 0) resolve(); else setTimeout(tick, 250);
             }
             tick();
         });
     }
 
     // ── Phase 2: AI generating ───────────────────────────────────────────
-    setPhase('generating', 100, 'KI generiert…');
-    if (progBar) { progBar.style.transition = 'none'; progBar.style.width = '0%'; }
-    // Animate indeterminate pulse via repeated width cycles
-    let pulse = 0;
-    const pulseTimer = setInterval(() => {
-        if (!progBar) return;
-        pulse = (pulse + 1) % 2;
-        progBar.style.transition = 'width 0.9s ease-in-out';
-        progBar.style.width = pulse ? '90%' : '15%';
-    }, 1000);
-
-    const toastId = showToast('loading', `Refreshing "${playlistName}"…`, 0);
+    topBarPulse('#60a5fa');
+    setBtnPhase('generating', '🤖 Generiert…');
+    const toastId = showToast('loading', `Refresh: "${playlistName}"…`, 0);
 
     try {
         const response = await fetchWithTimeout(`/api/playlists/${playlistId}/refresh`, {
@@ -1451,16 +1460,17 @@ async function refreshPlaylistNow(playlistId, playlistName) {
             headers: { 'Content-Type': 'application/json' }
         }, 180000);
 
-        clearInterval(pulseTimer);
         _lastAiCallTs = Date.now();
         try { localStorage.setItem('_lastAiCallTs', String(_lastAiCallTs)); } catch (_) {}
 
+        hideToast(toastId);
+
         if (response.status === 503 || response.status === 429) {
             const err = await response.json().catch(() => ({}));
-            hideToast(toastId);
+            topBarDone('#f59e0b');
             const msg = response.status === 429
                 ? (err.detail || 'Tages-KI-Budget erschöpft — bitte morgen erneut versuchen.')
-                : (err.detail || 'KI vorübergehend nicht verfügbar — Playlist unverändert, Wiederholung in 1 Stunde geplant.');
+                : (err.detail || 'KI vorübergehend nicht verfügbar — Playlist unverändert, Wiederholung in 1 Stunde.');
             showToast('warning', msg);
             resetBtn();
             loadAiBudget();
@@ -1473,18 +1483,17 @@ async function refreshPlaylistNow(playlistId, playlistName) {
         }
 
         // ── Phase 3: Done ────────────────────────────────────────────────
-        setPhase('done', 100, '✓ Fertig');
-        setTimeout(() => resetBtn(), 1500);
-
-        hideToast(toastId);
+        topBarDone('#10b981');
+        setBtnPhase('done', '✓ Fertig');
+        setTimeout(() => resetBtn(), 1400);
         showToast('success', `"${playlistName}" wurde erfolgreich aktualisiert!`);
         loadAiBudget();
         loadPlaylists();
 
     } catch (error) {
-        clearInterval(pulseTimer);
         console.error('Error refreshing playlist:', error);
         hideToast(toastId);
+        topBarDone('#ef4444');
         showToast('error', error.message);
         resetBtn();
     }

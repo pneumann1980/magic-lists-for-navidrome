@@ -33,22 +33,48 @@
             font-optical-sizing: auto;
             font-style: normal;
             -webkit-font-smoothing: antialiased;
-            font-size:16px; 
+            font-size:16px;
+        }
+        .app-container { max-width: 1024px; margin: 0 auto; }
+        .font-serif { font-family: "IBM Plex Serif", serif; font-weight: 400; font-style: normal; }
+
+        /* ── Top progress bar (YouTube-style) ── */
+        #page-progress {
+            position: fixed; top: 0; left: 0; right: 0; height: 3px;
+            z-index: 9999; pointer-events: none; overflow: hidden;
+        }
+        #page-progress-bar {
+            height: 100%; width: 0%; background: #60a5fa;
+            transition: none; transform-origin: left;
+        }
+        #page-progress.pulse #page-progress-bar {
+            animation: progress-pulse 1.4s ease-in-out infinite;
+        }
+        @keyframes progress-pulse {
+            0%   { width: 30%; }
+            50%  { width: 82%; }
+            100% { width: 30%; }
         }
 
-        /* Container styling */
-        .app-container {
-            max-width: 1024px;
-            margin: 0 auto;
-        }
-        .font-serif{
-            font-family: "IBM Plex Serif", serif;
-            font-weight: 400;
-            font-style: normal;
+        /* ── Spinner on Refresh button ── */
+        @keyframes btn-spin { to { transform: rotate(360deg); } }
+        button.refresh-loading { position: relative; padding-left: 1.6rem !important; }
+        button.refresh-loading::before {
+            content: '';
+            position: absolute; left: 0.45rem; top: 50%;
+            transform: translateY(-50%);
+            width: 11px; height: 11px;
+            border: 2px solid rgba(59,130,246,0.25);
+            border-top-color: #3b82f6;
+            border-radius: 50%;
+            animation: btn-spin 0.75s linear infinite;
         }
     </style>
 </head>
 <body class="bg-gray-100">
+    <!-- Top progress bar (fixed, above everything, YouTube-style) -->
+    <div id="page-progress"><div id="page-progress-bar"></div></div>
+
     <!-- Main container with flex layout -->
     <div id="magic" class="flex flex-col min-h-screen md:max-w-[1024px] md:mx-auto relative">
         <!-- Navbar -->
