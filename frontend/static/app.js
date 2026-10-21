@@ -385,29 +385,28 @@ document.addEventListener('DOMContentLoaded', function() {
     // Check database connectivity
     checkDatabaseConnectivity();
 
-    // Load AI budget indicator
+    // Load AI budget indicator and any pending refresh queue
     loadAiBudget();
+    pollRefreshQueue();
 });
 
 async function loadAiBudget() {
     const bar  = document.getElementById('ai-budget-bar');
     const text = document.getElementById('ai-budget-text');
+    const widget = document.getElementById('ai-budget-widget');
     if (!bar || !text) return;
     try {
         const res = await fetch('/api/ai-budget');
         if (!res.ok) { text.textContent = '?'; return; }
-        const { remaining, limit } = await res.json();
-        const pct = limit > 0 ? Math.round((remaining / limit) * 100) : 0;
+        const { used, limit, remaining } = await res.json();
+        const pct = limit > 0 ? Math.min(100, Math.round((used / limit) * 100)) : 100;
         bar.style.width  = pct + '%';
-        text.textContent = `${remaining}/${limit}`;
+        text.textContent = `${used}/${limit}`;
         bar.style.background  = remaining <= 0 ? '#ef4444' : remaining <= 3 ? '#f59e0b' : '#10b981';
         text.style.color      = remaining <= 0 ? '#dc2626' : remaining <= 3 ? '#d97706' : '#6b7280';
+        if (widget) widget.title = `${used} von ${limit} KI-Anfragen heute verbraucht (Reset ca. 09:00 Uhr)`;
     } catch (_) { text.textContent = '?'; }
 }
-
-// Tracks last AI call time client-side for rate-limit countdown estimate
-let _lastAiCallTs = parseInt(localStorage.getItem('_lastAiCallTs') || '0', 10);
-const _AI_COOLDOWN_MS = 13000;
 
 // Load artists and populate the select (from original working code)
 async function loadArtists() {
@@ -1146,6 +1145,7 @@ async function loadPlaylists() {
         }
 
         renderPlaylists(playlists);
+        applyQueueToButtons();
 
     } catch (error) {
         console.error('Error loading playlists:', error);
@@ -1205,6 +1205,7 @@ function renderPlaylists(playlists) {
                         ${hasSchedule ? `
                         <button
                             id="refresh-btn-${playlist.id}"
+                            data-name="${playlist.playlist_name.replace(/"/g, '&quot;')}"
                             onclick="refreshPlaylistNow(${playlist.id}, '${escapedName}')"
                             class="text-sm font-medium cursor-pointer border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 rounded px-2 py-1 whitespace-nowrap"
                         >
@@ -1412,91 +1413,173 @@ function topBarDone(color) {
     }, 600);
 }
 
+// ── Manual refresh queue ──────────────────────────────────────────────────
+let _queueState = { queue: [], recent: [], budget: null };
+let _queuePollTimer = null;
+let _lastRecentId = null;
+let _queueBarActive = false;
+
 async function refreshPlaylistNow(playlistId, playlistName) {
-    const btn = document.getElementById(`refresh-btn-${playlistId}`);
-    const originalText = btn ? btn.textContent.trim() : 'Refresh Now';
-
-    function setBtnPhase(phase, label) {
-        if (!btn) return;
-        btn.disabled = true;
-        btn.classList.add('opacity-70', 'cursor-not-allowed');
-        btn.classList.toggle('refresh-loading', phase !== 'idle');
-        btn.textContent = label;
-    }
-    function resetBtn() {
-        if (!btn) return;
-        btn.disabled = false;
-        btn.textContent = originalText;
-        btn.classList.remove('opacity-70', 'cursor-not-allowed', 'refresh-loading');
-    }
-
-    // ── Phase 1: rate-limit cooldown (client-side estimate) ─────────────
-    const elapsed = Date.now() - _lastAiCallTs;
-    const waitMs  = Math.max(0, _AI_COOLDOWN_MS - elapsed);
-
-    if (waitMs > 0) {
-        topBarShow('#f59e0b');
-        const start = Date.now();
-        await new Promise(resolve => {
-            function tick() {
-                const rem = Math.max(0, waitMs - (Date.now() - start));
-                const pct = Math.round(((waitMs - rem) / waitMs) * 100);
-                topBarSet(pct, 'width 0.25s linear');
-                setBtnPhase('cooldown', `⏱ ${Math.ceil(rem / 1000)}s…`);
-                if (rem <= 0) resolve(); else setTimeout(tick, 250);
-            }
-            tick();
-        });
-    }
-
-    // ── Phase 2: AI generating ───────────────────────────────────────────
-    topBarPulse('#60a5fa');
-    setBtnPhase('generating', '🤖 Generiert…');
-    const toastId = showToast('loading', `Refresh: "${playlistName}"…`, 0);
-
     try {
-        const response = await fetchWithTimeout(`/api/playlists/${playlistId}/refresh`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' }
-        }, 180000);
-
-        _lastAiCallTs = Date.now();
-        try { localStorage.setItem('_lastAiCallTs', String(_lastAiCallTs)); } catch (_) {}
-
-        hideToast(toastId);
-
-        if (response.status === 503 || response.status === 429) {
-            const err = await response.json().catch(() => ({}));
-            topBarDone('#f59e0b');
-            const msg = response.status === 429
-                ? (err.detail || 'Tages-KI-Budget erschöpft — bitte morgen erneut versuchen.')
-                : (err.detail || 'KI vorübergehend nicht verfügbar — Playlist unverändert, Wiederholung in 1 Stunde.');
-            showToast('warning', msg);
-            resetBtn();
-            loadAiBudget();
-            return;
-        }
-
-        if (!response.ok) {
-            const err = await response.json().catch(() => ({ detail: 'Unknown error' }));
-            throw new Error(err.detail || 'Failed to refresh playlist');
-        }
-
-        // ── Phase 3: Done ────────────────────────────────────────────────
-        topBarDone('#10b981');
-        setBtnPhase('done', '✓ Fertig');
-        setTimeout(() => resetBtn(), 1400);
-        showToast('success', `"${playlistName}" wurde erfolgreich aktualisiert!`);
-        loadAiBudget();
-        loadPlaylists();
-
+        const res = await fetch(`/api/playlists/${playlistId}/refresh`, { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || 'Refresh konnte nicht eingereiht werden');
+        showToast('success', data.already_queued
+            ? `"${playlistName}" ist bereits in der Warteliste (Platz ${data.position}).`
+            : `"${playlistName}" in die Warteliste eingereiht (Platz ${data.position}).`, 3500);
+        await pollRefreshQueue();
     } catch (error) {
-        console.error('Error refreshing playlist:', error);
-        hideToast(toastId);
-        topBarDone('#ef4444');
+        console.error('Error queueing refresh:', error);
         showToast('error', error.message);
-        resetBtn();
     }
+}
+
+async function cancelQueuedRefresh(playlistId) {
+    try {
+        const res = await fetch(`/api/refresh-queue/${playlistId}`, { method: 'DELETE' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || 'Abbrechen fehlgeschlagen');
+        await pollRefreshQueue();
+    } catch (error) { showToast('warning', error.message); }
+}
+
+async function prioritizeQueuedRefresh(playlistId) {
+    try {
+        const res = await fetch(`/api/refresh-queue/${playlistId}/prioritize`, { method: 'POST' });
+        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || 'Fehlgeschlagen');
+        await pollRefreshQueue();
+    } catch (error) { showToast('warning', error.message); }
+}
+
+async function clearRefreshQueue() {
+    try {
+        await fetch('/api/refresh-queue', { method: 'DELETE' });
+        await pollRefreshQueue();
+    } catch (error) { showToast('error', error.message); }
+}
+
+async function pollRefreshQueue() {
+    try {
+        const res = await fetch('/api/refresh-queue');
+        if (!res.ok) return;
+        const data = await res.json();
+        const prevActive = _queueState.queue.length > 0;
+        _queueState = data;
+
+        // Toast for refreshes that finished since the last poll
+        const maxId = data.recent.reduce((mx, r) => Math.max(mx, r.id), 0);
+        if (_lastRecentId === null) {
+            _lastRecentId = maxId;
+        } else {
+            const fresh = data.recent.filter(r => r.id > _lastRecentId);
+            _lastRecentId = maxId;
+            fresh.forEach(r => {
+                if (r.result === 'ok') showToast('success', `"${r.name}" wurde erfolgreich aktualisiert!`);
+                else if (r.result === 'failed') showToast('warning', `"${r.name}": ${r.message}`, 8000);
+            });
+            if (fresh.some(r => r.result === 'ok')) loadPlaylists();
+            if (fresh.length) loadAiBudget();
+        }
+
+        renderQueueUI();
+        if (data.queue.length > 0) startQueuePolling();
+        else {
+            stopQueuePolling();
+            if (prevActive) loadAiBudget();
+        }
+    } catch (_) { /* ignore transient poll errors */ }
+}
+
+function startQueuePolling() {
+    if (_queuePollTimer) return;
+    _queuePollTimer = setInterval(pollRefreshQueue, 3000);
+}
+function stopQueuePolling() {
+    if (_queuePollTimer) { clearInterval(_queuePollTimer); _queuePollTimer = null; }
+}
+
+function _queueStatusLabel(item) {
+    if (item.status === 'running') return '🤖 läuft';
+    if (item.status === 'waiting_budget') return '⏸ wartet auf KI-Budget';
+    return '⏳ wartet';
+}
+
+function renderQueueUI() {
+    const q = _queueState.queue || [];
+    const recent = (_queueState.recent || []).slice(-3).reverse();
+
+    // Top progress bar follows queue activity
+    if (q.length > 0 && !_queueBarActive) { _queueBarActive = true; topBarPulse('#60a5fa'); }
+    else if (q.length === 0 && _queueBarActive) { _queueBarActive = false; topBarDone('#10b981'); }
+
+    // Panel
+    const panel = document.getElementById('refresh-queue-panel');
+    if (panel) {
+        if (q.length === 0 && recent.length === 0) {
+            panel.style.display = 'none';
+            panel.innerHTML = '';
+        } else {
+            const waiting = q.filter(i => i.status !== 'running').length;
+            const budget = _queueState.budget;
+            const budgetNote = budget && budget.used >= budget.limit
+                ? `<p class="text-xs text-amber-700 mb-2">KI-Tagesbudget aufgebraucht (${budget.used}/${budget.limit}) – die Warteliste läuft automatisch weiter, sobald es zurückgesetzt wird (ca. 09:00 Uhr).</p>` : '';
+            panel.style.display = '';
+            panel.innerHTML = `
+                <div class="flex items-center justify-between mb-2">
+                    <h2 class="text-base font-semibold text-gray-900 m-0">Warteliste (${q.length})</h2>
+                    ${waiting > 0 ? `<button onclick="clearRefreshQueue()" class="text-xs font-medium cursor-pointer border border-red-200 bg-white text-red-600 hover:bg-red-50 rounded px-2 py-1">Alle abbrechen</button>` : ''}
+                </div>
+                ${budgetNote}
+                <ul class="m-0 p-0 list-none space-y-1">
+                    ${q.map(item => `
+                    <li class="flex items-center justify-between gap-2 bg-white border border-blue-100 rounded px-2 py-1">
+                        <span class="text-sm text-gray-800 truncate"><span class="text-gray-400 tabular-nums">#${item.position}</span> ${escapeHtmlText(item.name)}
+                            <span class="text-xs text-gray-500">· ${_queueStatusLabel(item)}</span></span>
+                        <span class="flex-none flex gap-1">
+                            ${item.status !== 'running' && item.position > 1 ? `<button title="Vorziehen" onclick="prioritizeQueuedRefresh(${item.playlist_id})" class="text-xs cursor-pointer border border-gray-200 bg-white rounded px-2 py-0.5">↑</button>` : ''}
+                            ${item.status !== 'running' ? `<button title="Abbrechen" onclick="cancelQueuedRefresh(${item.playlist_id})" class="text-xs cursor-pointer border border-red-200 bg-white text-red-600 rounded px-2 py-0.5">✕</button>` : ''}
+                        </span>
+                    </li>`).join('')}
+                </ul>
+                ${recent.length ? `<div class="mt-2 text-xs text-gray-500 space-y-0.5">${recent.map(r =>
+                    `<div>${r.result === 'ok' ? '✓' : r.result === 'cancelled' ? '⊘' : '✗'} ${escapeHtmlText(r.name)} – ${escapeHtmlText(r.message)}</div>`).join('')}</div>` : ''}
+            `;
+        }
+    }
+
+    applyQueueToButtons();
+}
+
+function escapeHtmlText(str) {
+    return String(str ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function applyQueueToButtons() {
+    document.querySelectorAll('button[id^="refresh-btn-"]').forEach(btn => {
+        const id = parseInt(btn.id.replace('refresh-btn-', ''), 10);
+        const item = (_queueState.queue || []).find(i => i.playlist_id === id);
+        const name = btn.dataset.name || '';
+        btn.classList.remove('refresh-loading');
+        btn.disabled = false;
+        btn.style.cssText = '';
+        if (!item) {
+            btn.textContent = 'Refresh Now';
+            btn.onclick = () => refreshPlaylistNow(id, name);
+        } else if (item.status === 'running') {
+            btn.textContent = '🤖 Läuft…';
+            btn.disabled = true;
+            btn.classList.add('refresh-loading');
+            btn.style.opacity = '0.8';
+            btn.style.cursor = 'not-allowed';
+        } else {
+            btn.textContent = `✕ Abbrechen (#${item.position})`;
+            btn.title = item.status === 'waiting_budget' ? 'Wartet auf KI-Budget' : 'In der Warteliste – klicken zum Abbrechen';
+            btn.style.background = '#fef2f2';
+            btn.style.borderColor = '#fecaca';
+            btn.style.color = '#b91c1c';
+            btn.onclick = () => cancelQueuedRefresh(id);
+        }
+    });
 }
 
 async function deletePlaylist(playlistId, playlistName) {
