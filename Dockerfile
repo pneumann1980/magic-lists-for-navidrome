@@ -1,5 +1,9 @@
 FROM python:3.11-slim
 
+# Build-time git commit hash for cache-busting static assets
+ARG GIT_COMMIT=dev
+ENV GIT_COMMIT=$GIT_COMMIT
+
 # Set working directory
 WORKDIR /app
 
