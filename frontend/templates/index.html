@@ -87,10 +87,10 @@
                         </a>
                     </div>
                     <div class="flex items-center gap-3">
-                        <div id="ai-budget-widget" class="flex items-center gap-2" title="Verbleibende KI-Anfragen heute">
+                        <div id="ai-budget-widget" class="flex items-center gap-2" title="Verbrauchte KI-Anfragen heute">
                             <span class="text-xs text-gray-400 select-none">KI</span>
                             <div style="position:relative;width:72px;height:8px;border-radius:999px;background:#e5e7eb;overflow:hidden;">
-                                <div id="ai-budget-bar" style="position:absolute;left:0;top:0;height:100%;width:100%;border-radius:999px;background:#10b981;transition:width 0.7s ease,background 0.4s ease;"></div>
+                                <div id="ai-budget-bar" style="position:absolute;left:0;top:0;height:100%;width:0%;border-radius:999px;background:#10b981;transition:width 0.7s ease,background 0.4s ease;"></div>
                             </div>
                             <span id="ai-budget-text" class="text-xs font-medium tabular-nums text-gray-500">…</span>
                         </div>
@@ -1026,6 +1026,9 @@
                           <h1 class="text-2xl font-bold text-gray-900 mb-3">Manage Playlists</h1>
                           <p class="text-gray-600">View and manage all playlists you've created. These are synced with your Navidrome library.</p>
                       </div>
+
+                      <!-- Refresh queue panel (filled by app.js) -->
+                      <div id="refresh-queue-panel" style="display:none;" class="mb-6 border border-blue-200 bg-blue-50 rounded-lg p-4"></div>
 
                       <!-- Loading State -->
                       <div id="playlists-loading" class="hidden text-center p-4 rounded-lg mb-4 bg-gray-50">

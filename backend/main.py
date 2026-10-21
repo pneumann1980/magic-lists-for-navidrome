@@ -8,7 +8,7 @@ import uvicorn
 import os
 import logging
 import logging.handlers
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -104,6 +104,7 @@ async def startup_event():
     # Auto-start the cron job
     await start_scheduler_job()
     scheduler_logger.info("✅ Cron job auto-started on application startup")
+    _start_refresh_worker()
     
     # SYSTEM CHECK FEATURE - START
     # Run system checks on startup
@@ -2739,76 +2740,214 @@ async def delete_playlist(playlist_id: int, db: DatabaseManager = Depends(get_db
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete playlist: {str(e)}")
 
-@app.post("/api/playlists/{playlist_id}/refresh")
-async def refresh_playlist_now(playlist_id: int, db: DatabaseManager = Depends(get_db)):
-    """Manually refresh a specific playlist immediately"""
-    try:
-        playlist = await db.get_playlist_by_id_with_schedule_info(playlist_id)
+# ── Manual refresh queue ───────────────────────────────────────────────────
+# Items: {playlist_id, name, status: queued|waiting_budget|running, enqueued_at}
+_refresh_queue: List[Dict[str, Any]] = []
+_refresh_recent: List[Dict[str, Any]] = []
+_refresh_recent_seq = 0
+_refresh_wakeup: Optional[asyncio.Event] = None
+_refresh_worker_task: Optional["asyncio.Task"] = None
 
-        if not playlist:
-            raise HTTPException(status_code=404, detail="Playlist not found")
 
-        navidrome_playlist_id = playlist.get("navidrome_playlist_id")
-        if not navidrome_playlist_id:
-            raise HTTPException(status_code=400, detail="Playlist has no Navidrome ID")
+def _make_db() -> DatabaseManager:
+    default_path = "/app/data/magiclists.db" if os.path.exists("/app/data") else "./magiclists.db"
+    return DatabaseManager(os.getenv("DATABASE_PATH", default_path))
 
-        playlist_type = playlist.get("playlist_type")
-        if not playlist_type:
-            raise HTTPException(status_code=400, detail="Playlist has no scheduled refresh type - only scheduled playlists can be refreshed")
 
-        # Get the scheduled playlist record to pass into the refresh functions
-        scheduled = await db.get_scheduled_playlist_by_navidrome_id(navidrome_playlist_id)
-        if not scheduled:
-            raise HTTPException(status_code=400, detail="No refresh schedule found for this playlist. Set a refresh frequency first.")
+def _queue_view() -> List[Dict[str, Any]]:
+    """Queue items with 1-based position, running items first."""
+    return [
+        {**item, "position": idx + 1}
+        for idx, item in enumerate(_refresh_queue)
+    ]
 
-        # Clean up any duplicates to keep DB tidy
-        await db.delete_duplicate_scheduled_playlists(navidrome_playlist_id)
 
-        # Check daily AI budget before calling
-        used_today = await db.get_ai_requests_today()
-        remaining = AI_RPD_LIMIT - used_today
-        if remaining <= 0:
-            raise HTTPException(
-                status_code=429,
-                detail=(
-                    f"Tages-KI-Budget erschöpft ({used_today}/{AI_RPD_LIMIT} Anfragen). "
-                    "Zurücksetzung um Mitternacht US-Pazifik (ca. 09:00 Uhr deutscher Zeit)."
-                )
-            )
+def _record_recent(item: Dict[str, Any], result: str, message: str) -> None:
+    global _refresh_recent_seq
+    _refresh_recent_seq += 1
+    _refresh_recent.append({
+        "id": _refresh_recent_seq,
+        "playlist_id": item["playlist_id"],
+        "name": item["name"],
+        "result": result,
+        "message": message,
+        "finished_at": datetime.now().isoformat(),
+    })
+    del _refresh_recent[:-10]
 
-        # Respect the rate limit (min 13 s between calls → max ~4.6 RPM)
+
+async def _resolve_refreshable(playlist_id: int, db: DatabaseManager):
+    """Validate that a playlist can be refreshed; returns (playlist, scheduled)."""
+    playlist = await db.get_playlist_by_id_with_schedule_info(playlist_id)
+    if not playlist:
+        raise HTTPException(status_code=404, detail="Playlist not found")
+
+    navidrome_playlist_id = playlist.get("navidrome_playlist_id")
+    if not navidrome_playlist_id:
+        raise HTTPException(status_code=400, detail="Playlist has no Navidrome ID")
+
+    if not playlist.get("playlist_type"):
+        raise HTTPException(status_code=400, detail="Playlist has no scheduled refresh type - only scheduled playlists can be refreshed")
+
+    scheduled = await db.get_scheduled_playlist_by_navidrome_id(navidrome_playlist_id)
+    if not scheduled:
+        raise HTTPException(status_code=400, detail="No refresh schedule found for this playlist. Set a refresh frequency first.")
+
+    await db.delete_duplicate_scheduled_playlists(navidrome_playlist_id)
+    return playlist, scheduled
+
+
+async def _execute_playlist_refresh(playlist_id: int, db: DatabaseManager) -> None:
+    """Run the type-specific refresh for one playlist (rate limiting happens inside)."""
+    _, scheduled = await _resolve_refreshable(playlist_id, db)
+    scheduler_logger.info(f"🔄 Queue: refreshing playlist ID: {playlist_id} (type: {scheduled.playlist_type})")
+
+    if scheduled.playlist_type in ("rediscover", "rediscover_weekly_v2"):
         await _ai_rate_limit()
+        await refresh_rediscover_playlist(scheduled, db)
+    elif scheduled.playlist_type == "this_is":
+        await refresh_this_is_playlist(scheduled, db)
+    elif scheduled.playlist_type == "genre_mix":
+        await refresh_genre_mix_playlist(scheduled, db)
+    elif scheduled.playlist_type == "multi_artist_radio":
+        await refresh_multi_artist_radio_playlist(scheduled, db)
+    elif scheduled.playlist_type == "multi_genre_mix":
+        await refresh_multi_genre_mix_playlist(scheduled, db)
+    elif scheduled.playlist_type == "decade_discovery":
+        await refresh_decade_discovery_playlist(scheduled, db)
+    elif scheduled.playlist_type == "sonic_journey":
+        await refresh_sonic_journey_playlist(scheduled, db)
+    elif scheduled.playlist_type == "genre_archaeology":
+        await refresh_genre_archaeology_playlist(scheduled, db)
+    else:
+        raise HTTPException(status_code=400, detail=f"Unsupported playlist type for refresh: {scheduled.playlist_type}")
 
-        scheduler_logger.info(f"🔄 Manual refresh requested for playlist ID: {playlist_id} (type: {playlist_type}, budget: {remaining} left today)")
 
-        if scheduled.playlist_type in ("rediscover", "rediscover_weekly_v2"):
-            await refresh_rediscover_playlist(scheduled, db)
-        elif scheduled.playlist_type == "this_is":
-            await refresh_this_is_playlist(scheduled, db)
-        elif scheduled.playlist_type == "genre_mix":
-            await refresh_genre_mix_playlist(scheduled, db)
-        elif scheduled.playlist_type == "multi_artist_radio":
-            await refresh_multi_artist_radio_playlist(scheduled, db)
-        elif scheduled.playlist_type == "multi_genre_mix":
-            await refresh_multi_genre_mix_playlist(scheduled, db)
-        elif scheduled.playlist_type == "decade_discovery":
-            await refresh_decade_discovery_playlist(scheduled, db)
-        elif scheduled.playlist_type == "sonic_journey":
-            await refresh_sonic_journey_playlist(scheduled, db)
-        elif scheduled.playlist_type == "genre_archaeology":
-            await refresh_genre_archaeology_playlist(scheduled, db)
-        else:
-            raise HTTPException(status_code=400, detail=f"Unsupported playlist type for refresh: {scheduled.playlist_type}")
+async def _refresh_queue_worker() -> None:
+    """Process queued manual refreshes one at a time; pause while the daily budget is exhausted."""
+    while True:
+        item = next((i for i in _refresh_queue if i["status"] in ("queued", "waiting_budget")), None)
+        if item is None:
+            _refresh_wakeup.clear()
+            await _refresh_wakeup.wait()
+            continue
 
-        return {"message": "Playlist refreshed successfully"}
+        db = _make_db()
+        try:
+            used = await db.get_ai_requests_today()
+            if used >= AI_RPD_LIMIT:
+                item["status"] = "waiting_budget"
+                _refresh_wakeup.clear()
+                try:
+                    await asyncio.wait_for(_refresh_wakeup.wait(), timeout=60)
+                except asyncio.TimeoutError:
+                    pass
+                continue
 
-    except AITemporarilyUnavailableError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+            item["status"] = "running"
+            try:
+                await _execute_playlist_refresh(item["playlist_id"], db)
+                _record_recent(item, "ok", "Aktualisiert")
+                _refresh_queue.remove(item)
+            except AITemporarilyUnavailableError as e:
+                if await db.get_ai_requests_today() >= AI_RPD_LIMIT:
+                    item["status"] = "waiting_budget"
+                else:
+                    _record_recent(item, "failed", str(e))
+                    _refresh_queue.remove(item)
+            except HTTPException as e:
+                _record_recent(item, "failed", str(e.detail))
+                _refresh_queue.remove(item)
+            except Exception as e:
+                scheduler_logger.error(f"❌ Queued refresh failed for playlist ID {item['playlist_id']}: {e}")
+                _record_recent(item, "failed", str(e))
+                _refresh_queue.remove(item)
+        except Exception as e:
+            scheduler_logger.error(f"❌ Refresh queue worker error: {e}")
+            await asyncio.sleep(5)
+
+
+def _start_refresh_worker() -> None:
+    global _refresh_wakeup, _refresh_worker_task
+    _refresh_wakeup = asyncio.Event()
+    _refresh_worker_task = asyncio.create_task(_refresh_queue_worker())
+
+
+@app.post("/api/playlists/{playlist_id}/refresh", status_code=202)
+async def refresh_playlist_now(playlist_id: int, db: DatabaseManager = Depends(get_db)):
+    """Queue a manual refresh; the queue worker runs them one by one within the AI limits."""
+    try:
+        playlist, _ = await _resolve_refreshable(playlist_id, db)
+
+        existing = next((i for i in _refresh_queue if i["playlist_id"] == playlist_id), None)
+        if existing:
+            return {"status": existing["status"], "already_queued": True,
+                    "position": _refresh_queue.index(existing) + 1, "queue_length": len(_refresh_queue)}
+
+        _refresh_queue.append({
+            "playlist_id": playlist_id,
+            "name": playlist.get("playlist_name") or f"Playlist {playlist_id}",
+            "status": "queued",
+            "enqueued_at": datetime.now().isoformat(),
+        })
+        if _refresh_wakeup is not None:
+            _refresh_wakeup.set()
+        scheduler_logger.info(f"📥 Queued manual refresh for playlist ID: {playlist_id} (queue length: {len(_refresh_queue)})")
+        return {"status": "queued", "already_queued": False,
+                "position": len(_refresh_queue), "queue_length": len(_refresh_queue)}
     except HTTPException:
         raise
     except Exception as e:
-        scheduler_logger.error(f"❌ Error in manual playlist refresh for ID {playlist_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to refresh playlist: {str(e)}")
+        scheduler_logger.error(f"❌ Error queueing refresh for ID {playlist_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to queue refresh: {str(e)}")
+
+
+@app.get("/api/refresh-queue")
+async def get_refresh_queue(db: DatabaseManager = Depends(get_db)):
+    """Return the manual refresh queue, recent results and AI budget."""
+    used = await db.get_ai_requests_today()
+    return {
+        "queue": _queue_view(),
+        "recent": list(_refresh_recent),
+        "budget": {"used": used, "limit": AI_RPD_LIMIT},
+    }
+
+
+@app.delete("/api/refresh-queue/{playlist_id}")
+async def cancel_queued_refresh(playlist_id: int):
+    """Remove one waiting playlist from the queue (a running refresh cannot be interrupted)."""
+    item = next((i for i in _refresh_queue if i["playlist_id"] == playlist_id), None)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Playlist is not in the queue")
+    if item["status"] == "running":
+        raise HTTPException(status_code=409, detail="Die KI-Anfrage läuft bereits und kann nicht mehr abgebrochen werden.")
+    _refresh_queue.remove(item)
+    _record_recent(item, "cancelled", "Abgebrochen")
+    return {"message": "Removed from queue"}
+
+
+@app.delete("/api/refresh-queue")
+async def clear_refresh_queue():
+    """Remove all waiting playlists from the queue (the running one continues)."""
+    waiting = [i for i in _refresh_queue if i["status"] != "running"]
+    for item in waiting:
+        _refresh_queue.remove(item)
+        _record_recent(item, "cancelled", "Abgebrochen")
+    return {"removed": len(waiting)}
+
+
+@app.post("/api/refresh-queue/{playlist_id}/prioritize")
+async def prioritize_queued_refresh(playlist_id: int):
+    """Move a waiting playlist to the front of the queue (right after the running one)."""
+    item = next((i for i in _refresh_queue if i["playlist_id"] == playlist_id), None)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Playlist is not in the queue")
+    if item["status"] == "running":
+        raise HTTPException(status_code=409, detail="Already running")
+    _refresh_queue.remove(item)
+    insert_at = sum(1 for i in _refresh_queue if i["status"] == "running")
+    _refresh_queue.insert(insert_at, item)
+    return {"position": insert_at + 1}
 
 @app.patch("/api/playlists/{playlist_id}/settings")
 async def update_playlist_settings(playlist_id: int, request: UpdatePlaylistSettingsRequest, db: DatabaseManager = Depends(get_db)):
