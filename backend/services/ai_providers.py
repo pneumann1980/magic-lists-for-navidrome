@@ -2,8 +2,27 @@ import os
 import httpx
 import json
 import re
-from typing import Optional, Dict, Any, Union, NoReturn
+import asyncio
+from typing import Optional, Dict, Any, Union, NoReturn, Callable, Awaitable
 from dataclasses import dataclass
+
+_usage_hook: Optional[Callable[[str], Awaitable[None]]] = None
+
+
+def set_usage_hook(hook: Optional[Callable[[str], Awaitable[None]]]) -> None:
+    """Register a callback receiving "request" (per HTTP attempt) and "daily_exhausted" events."""
+    global _usage_hook
+    _usage_hook = hook
+
+
+async def _notify_usage(event: str) -> None:
+    if _usage_hook is None:
+        return
+    try:
+        await _usage_hook(event)
+    except Exception:
+        pass
+
 
 @dataclass
 class ProviderConfig:
@@ -196,6 +215,7 @@ class AIProvider:
 
         for attempt in range(max_retries):
             try:
+                await _notify_usage("request")
                 response = await self.client.post(
                     url,
                     json=payload,
@@ -216,6 +236,18 @@ class AIProvider:
                     )
                 except Exception:
                     error_desc = f"HTTP {e.response.status_code} — {e.response.text[:300]}"
+
+                if e.response.status_code == 429:
+                    body = e.response.text
+                    delay_match = re.search(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"', body)
+                    retry_after = float(delay_match.group(1)) if delay_match else 0.0
+                    if "PerDay" in body or retry_after > 90:
+                        await _notify_usage("daily_exhausted")
+                    elif attempt < max_retries - 1:
+                        wait = min(max(retry_after, 5.0), 65.0) + 1.0
+                        print(f"⏳ Google AI per-minute limit hit (attempt {attempt + 1}/{max_retries}), waiting {wait:.0f}s...")
+                        await asyncio.sleep(wait)
+                        continue
 
                 if e.response.status_code in (500, 503) and attempt < max_retries - 1:
                     print(f"🔄 Google AI transient error {e.response.status_code} (attempt {attempt + 1}/{max_retries}), retrying in {retry_delay}s...")
