@@ -546,25 +546,13 @@ class HealthCheckService:
                 "suggestion": "Get a FREE API key at: https://ai.google.dev/ (generous free tier available)"
             }
         
-        # Test API connectivity with a minimal request
+        # Use models.get (no generateContent) so the health check never consumes RPD/RPM quota
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-                
-                # Minimal test payload for Google AI
-                payload = {
-                    "contents": [{
-                        "parts": [{
-                            "text": "test"
-                        }]
-                    }],
-                    "generationConfig": {
-                        "maxOutputTokens": 1
-                    }
-                }
-                
-                response = await client.post(url, json=payload)
-                
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}?key={api_key}"
+
+                response = await client.get(url)
+
                 if response.status_code == 200:
                     return {
                         "name": "Google AI Provider",

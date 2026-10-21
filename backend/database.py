@@ -2,7 +2,7 @@ import sqlite3
 import aiosqlite
 import os
 from typing import List, Optional, Dict
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import json
 
 from .schemas import Playlist, ScheduledPlaylist
@@ -720,26 +720,45 @@ class DatabaseManager:
             await db.commit()
             return True
 
+    @staticmethod
+    def _ai_budget_date() -> str:
+        """Return the current quota day; Google resets daily quotas at midnight US Pacific time."""
+        try:
+            from zoneinfo import ZoneInfo
+            now = datetime.now(ZoneInfo("America/Los_Angeles"))
+        except Exception:
+            now = datetime.now(timezone.utc) - timedelta(hours=8)
+        return now.strftime("%Y-%m-%d")
+
     async def get_ai_requests_today(self) -> int:
-        """Return the number of AI requests made today."""
+        """Return the number of AI requests made in the current quota day."""
         await self.init_db()
-        today = datetime.now().strftime("%Y-%m-%d")
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute(
-                "SELECT requests_count FROM ai_usage WHERE date = ?", (today,)
+                "SELECT requests_count FROM ai_usage WHERE date = ?", (self._ai_budget_date(),)
             ) as cursor:
                 row = await cursor.fetchone()
                 return row[0] if row else 0
 
     async def increment_ai_requests(self, n: int = 1) -> None:
-        """Increment today's AI request counter by n."""
+        """Increment the current quota day's AI request counter by n."""
         await self.init_db()
-        today = datetime.now().strftime("%Y-%m-%d")
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 "INSERT INTO ai_usage (date, requests_count) VALUES (?, ?) "
                 "ON CONFLICT(date) DO UPDATE SET requests_count = requests_count + ?",
-                (today, n, n),
+                (self._ai_budget_date(), n, n),
+            )
+            await db.commit()
+
+    async def mark_ai_budget_exhausted(self, limit: int) -> None:
+        """Raise the current quota day's counter to at least `limit` (provider reported quota exhausted)."""
+        await self.init_db()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT INTO ai_usage (date, requests_count) VALUES (?, ?) "
+                "ON CONFLICT(date) DO UPDATE SET requests_count = MAX(requests_count, ?)",
+                (self._ai_budget_date(), limit, limit),
             )
             await db.commit()
 

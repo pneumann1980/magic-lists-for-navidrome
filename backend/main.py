@@ -19,7 +19,7 @@ import time
 load_dotenv()
 
 # Cache-buster: changes on every container start so browsers fetch fresh static files
-APP_VERSION = os.getenv("GIT_COMMIT", str(int(time.time())))
+APP_VERSION = os.getenv("GIT_COMMIT") or str(int(time.time()))
 
 # Get log level from environment (ERROR=minimal, INFO=normal, DEBUG=verbose)
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -55,6 +55,7 @@ from .rediscover import RediscoverWeekly, ReDiscoverV2Processor
 from .track_scoring import filter_tracks_for_this_is_playlist, build_tiered_pool, calculate_filter_threshold
 # SYSTEM CHECK FEATURE - START
 from .services.health_check_service import HealthCheckService
+from .services.ai_providers import set_usage_hook
 # SYSTEM CHECK FEATURE - END
 
 app = FastAPI(title="MagicLists Navidrome MVP")
@@ -65,6 +66,20 @@ AI_RPD_LIMIT = int(os.getenv("AI_RPD_LIMIT", "18"))
 # Minimum gap between consecutive AI calls (13 s ≈ 4.6 RPM vs. 5 RPM limit)
 _AI_MIN_INTERVAL: float = 13.0
 _last_ai_call_ts: float = 0.0
+
+
+async def _ai_usage_hook(event: str) -> None:
+    """Count every real provider HTTP request and mark the budget exhausted on a daily-quota 429."""
+    default_path = "/app/data/magiclists.db" if os.path.exists("/app/data") else "./magiclists.db"
+    usage_db = DatabaseManager(os.getenv("DATABASE_PATH", default_path))
+    if event == "request":
+        await usage_db.increment_ai_requests(1)
+    elif event == "daily_exhausted":
+        await usage_db.mark_ai_budget_exhausted(AI_RPD_LIMIT)
+        scheduler_logger.warning("🚫 Provider reported daily quota exhausted — AI budget set to 0 remaining")
+
+
+set_usage_hook(_ai_usage_hook)
 
 
 async def _ai_rate_limit() -> None:
@@ -1660,7 +1675,6 @@ async def refresh_playlist_batch(batch: list, db: DatabaseManager) -> None:
             max_tokens=8000,
             temperature=0.7,
         )
-        await db.increment_ai_requests(1)
         scheduler_logger.info(
             f"✅ Batch AI call succeeded for {len(tasks)} playlists (1 RPD consumed)"
         )
@@ -2071,7 +2085,6 @@ async def refresh_this_is_playlist(scheduled_playlist, db: DatabaseManager):
                 include_reasoning=True,
                 variety_context=variety_instruction
             )
-            await db.increment_ai_requests(1)
             
             # Handle both old and new return formats
             if isinstance(curation_result, tuple):
@@ -2217,7 +2230,6 @@ async def refresh_genre_mix_playlist(scheduled_playlist, db: DatabaseManager):
             include_reasoning=True,
             variety_context=variety_instruction
         )
-        await db.increment_ai_requests(1)
 
         if isinstance(curation_result, tuple):
             curated_track_ids, reasoning = curation_result
@@ -2339,7 +2351,6 @@ async def refresh_multi_artist_radio_playlist(scheduled_playlist, db: DatabaseMa
             artist_names=artist_names, tracks_json=filtered_tracks, num_tracks=original_length,
             include_reasoning=True, variety_context=variety_context
         )
-        await db.increment_ai_requests(1)
         curated_track_ids, reasoning = curation_result if isinstance(curation_result, tuple) else (curation_result, "")
 
         # Skip update if AI had a transient error (keep existing playlist, retry in 1 h)
@@ -2413,7 +2424,6 @@ async def refresh_multi_genre_mix_playlist(scheduled_playlist, db: DatabaseManag
             genre_names=genres, tracks_json=filtered_tracks, num_tracks=original_length,
             include_reasoning=True, variety_context=variety_context
         )
-        await db.increment_ai_requests(1)
         curated_track_ids, reasoning = curation_result if isinstance(curation_result, tuple) else (curation_result, "")
 
         if _is_transient_fallback(reasoning):
@@ -2494,7 +2504,6 @@ async def refresh_decade_discovery_playlist(scheduled_playlist, db: DatabaseMana
             decades=decades, mode=mode, tracks_json=tracks_for_llm, num_tracks=original_length, include_reasoning=True,
             variety_context=variety_context
         )
-        await db.increment_ai_requests(1)
         curated_track_ids, reasoning = curation_result if isinstance(curation_result, tuple) else (curation_result, "")
 
         if _is_transient_fallback(reasoning):
@@ -2570,7 +2579,6 @@ async def refresh_sonic_journey_playlist(scheduled_playlist, db: DatabaseManager
             tracks_json=filtered_tracks, num_tracks=original_length, include_reasoning=True,
             variety_context=variety_context
         )
-        await db.increment_ai_requests(1)
         curated_track_ids, reasoning = curation_result if isinstance(curation_result, tuple) else (curation_result, "")
 
         if _is_transient_fallback(reasoning):
@@ -2650,7 +2658,6 @@ async def refresh_genre_archaeology_playlist(scheduled_playlist, db: DatabaseMan
             num_tracks=original_length, include_reasoning=True,
             variety_context=variety_context
         )
-        await db.increment_ai_requests(1)
         curated_track_ids, reasoning = curation_result if isinstance(curation_result, tuple) else (curation_result, "")
 
         if _is_transient_fallback(reasoning):
@@ -2765,7 +2772,7 @@ async def refresh_playlist_now(playlist_id: int, db: DatabaseManager = Depends(g
                 status_code=429,
                 detail=(
                     f"Tages-KI-Budget erschöpft ({used_today}/{AI_RPD_LIMIT} Anfragen). "
-                    "Bitte morgen erneut versuchen oder das AI_RPD_LIMIT erhöhen."
+                    "Zurücksetzung um Mitternacht US-Pazifik (ca. 09:00 Uhr deutscher Zeit)."
                 )
             )
 
