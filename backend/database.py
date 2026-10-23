@@ -536,6 +536,14 @@ class DatabaseManager:
             await db.commit()
             return cursor.rowcount > 0
     
+    async def replace_navidrome_playlist_id(self, old_id: str, new_id: str) -> None:
+        """Point a playlist and its refresh schedule at a new Navidrome playlist ID."""
+        await self.init_db()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("UPDATE playlists SET navidrome_playlist_id = ? WHERE navidrome_playlist_id = ?", (new_id, old_id))
+            await db.execute("UPDATE scheduled_playlists SET navidrome_playlist_id = ? WHERE navidrome_playlist_id = ?", (new_id, old_id))
+            await db.commit()
+
     async def update_playlist_content(self, navidrome_playlist_id: str, songs: List[str], reasoning: Optional[str] = None) -> bool:
         """Update songs/reasoning and roll the songs_history (keeps last 4 snapshots)"""
         await self.init_db()

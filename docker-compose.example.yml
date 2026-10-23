@@ -34,6 +34,8 @@ services:
       # AI_THINKING_LEVEL: "low"
       # Daily AI request budget (Google free tier: 20/day for 2.5 Flash; keep a small buffer)
       # AI_RPD_LIMIT: "18"
+      # If a managed playlist no longer exists in Navidrome, recreate it on refresh (default: true)
+      # AUTO_RECREATE_PLAYLISTS: "true"
 
       # --- Database path (keep default unless you know what you're doing) ---
       DATABASE_PATH: "/app/data/magiclists.db"

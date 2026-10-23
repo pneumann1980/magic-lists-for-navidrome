@@ -919,6 +919,35 @@ class NavidromeClient:
         except Exception as e:
             raise Exception(f"Unexpected error creating playlist: {e}")
     
+    async def get_playlists(self) -> List[Dict[str, Any]]:
+        """Return all playlists visible to the authenticated user (own and public ones)."""
+        await self._ensure_authenticated()
+        response = await self.client.get(
+            f"{self.base_url}/rest/getPlaylists.view",
+            params=self._get_subsonic_params()
+        )
+        response.raise_for_status()
+        subsonic_response = response.json().get("subsonic-response", {})
+        if subsonic_response.get("status") != "ok":
+            error = subsonic_response.get("error", {})
+            raise Exception(f"Failed to list playlists: {error.get('message', 'Unknown error')}")
+        return subsonic_response.get("playlists", {}).get("playlist", []) or []
+
+    async def playlist_exists(self, playlist_id: str) -> bool:
+        """Return True if the playlist can be read by the authenticated user (False on 'not found')."""
+        await self._ensure_authenticated()
+        params = self._get_subsonic_params()
+        params["id"] = playlist_id
+        response = await self.client.get(f"{self.base_url}/rest/getPlaylist.view", params=params)
+        response.raise_for_status()
+        subsonic_response = response.json().get("subsonic-response", {})
+        if subsonic_response.get("status") == "ok":
+            return True
+        error = subsonic_response.get("error", {})
+        if error.get("code") == 70 or "not found" in str(error.get("message", "")).lower():
+            return False
+        raise Exception(f"Failed to check playlist: {error.get('message', 'Unknown error')}")
+
     async def update_playlist(self, playlist_id: str, track_ids: List[str], comment: str = None) -> bool:
         """Update an existing playlist by replacing all tracks
         

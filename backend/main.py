@@ -1579,6 +1579,13 @@ async def refresh_playlist_batch(batch: list, db: DatabaseManager) -> None:
                 await _defer_playlist(db, scheduled_playlist, "playlist not found in DB")
                 continue
 
+            healed_id = await _ensure_navidrome_playlist(
+                db, nav_client, scheduled_playlist.navidrome_playlist_id, original_playlist.get("playlist_name") or ""
+            )
+            if healed_id != scheduled_playlist.navidrome_playlist_id:
+                scheduled_playlist = scheduled_playlist.model_copy(update={"navidrome_playlist_id": healed_id})
+                original_playlist = await db.get_playlist_by_navidrome_playlist_id(healed_id)
+
             playlist_type = scheduled_playlist.playlist_type
             original_length = original_playlist.get("playlist_length", 25)
             stored_discovery_ratio = original_playlist.get("discovery_ratio", 0.25)
@@ -2008,6 +2015,13 @@ async def refresh_scheduled_playlists():
             budget -= 2
             await db.delete_duplicate_scheduled_playlists(scheduled_playlist.navidrome_playlist_id)
             try:
+                local_pl = await db.get_playlist_by_navidrome_playlist_id(scheduled_playlist.navidrome_playlist_id)
+                if local_pl:
+                    healed_id = await _ensure_navidrome_playlist(
+                        db, get_navidrome_client(), scheduled_playlist.navidrome_playlist_id, local_pl.get("playlist_name") or ""
+                    )
+                    if healed_id != scheduled_playlist.navidrome_playlist_id:
+                        scheduled_playlist = scheduled_playlist.model_copy(update={"navidrome_playlist_id": healed_id})
                 await refresh_rediscover_playlist(scheduled_playlist, db)
             except AITemporarilyUnavailableError:
                 pass
@@ -2939,9 +2953,62 @@ async def _resolve_refreshable(playlist_id: int, db: DatabaseManager):
     return playlist, scheduled
 
 
+AUTO_RECREATE_PLAYLISTS = os.getenv("AUTO_RECREATE_PLAYLISTS", "true").lower() in ("1", "true", "yes")
+
+
+async def _ensure_navidrome_playlist(db: DatabaseManager, nav_client, navidrome_playlist_id: str, playlist_name: str) -> str:
+    """Return a valid Navidrome playlist ID, repairing a stale one.
+
+    If the stored ID no longer exists for the Navidrome user (deleted, replaced by a player app,
+    or owned by someone else), adopt an own playlist with the same name, or recreate it.
+    """
+    try:
+        if await nav_client.playlist_exists(navidrome_playlist_id):
+            return navidrome_playlist_id
+    except Exception as check_err:
+        scheduler_logger.warning(f"⚠️ Could not verify Navidrome playlist {navidrome_playlist_id}: {check_err}")
+        return navidrome_playlist_id
+
+    scheduler_logger.warning(
+        f"🩹 Navidrome playlist '{playlist_name}' (ID {navidrome_playlist_id}) not found for user "
+        f"'{nav_client.username}' — repairing"
+    )
+    new_id = None
+    try:
+        same_name = [p for p in await nav_client.get_playlists() if p.get("name") == playlist_name]
+        own = [p for p in same_name if str(p.get("owner", nav_client.username)).lower() == str(nav_client.username).lower()]
+        if own:
+            new_id = own[0]["id"]
+            scheduler_logger.info(f"🩹 Adopted existing Navidrome playlist '{playlist_name}' with ID {new_id}")
+        elif same_name:
+            scheduler_logger.warning(
+                f"🩹 A playlist named '{playlist_name}' exists but belongs to '{same_name[0].get('owner')}', "
+                f"not '{nav_client.username}' — it cannot be updated by this app"
+            )
+    except Exception as list_err:
+        scheduler_logger.warning(f"⚠️ Could not list Navidrome playlists: {list_err}")
+
+    if new_id is None:
+        if not AUTO_RECREATE_PLAYLISTS:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Playlist '{playlist_name}' wurde in Navidrome nicht gefunden (AUTO_RECREATE_PLAYLISTS ist aus)."
+            )
+        new_id = await nav_client.create_playlist(playlist_name, [], "Recreated by Magic Lists")
+        scheduler_logger.info(f"🩹 Recreated Navidrome playlist '{playlist_name}' with new ID {new_id}")
+
+    await db.replace_navidrome_playlist_id(navidrome_playlist_id, new_id)
+    return new_id
+
+
 async def _execute_playlist_refresh(playlist_id: int, db: DatabaseManager) -> None:
     """Run the type-specific refresh for one playlist (rate limiting happens inside)."""
-    _, scheduled = await _resolve_refreshable(playlist_id, db)
+    playlist, scheduled = await _resolve_refreshable(playlist_id, db)
+    healed_id = await _ensure_navidrome_playlist(
+        db, get_navidrome_client(), scheduled.navidrome_playlist_id, playlist.get("playlist_name") or ""
+    )
+    if healed_id != scheduled.navidrome_playlist_id:
+        scheduled = await db.get_scheduled_playlist_by_navidrome_id(healed_id)
     scheduler_logger.info(f"🔄 Queue: refreshing playlist ID: {playlist_id} (type: {scheduled.playlist_type})")
 
     if scheduled.playlist_type in ("rediscover", "rediscover_weekly_v2"):
