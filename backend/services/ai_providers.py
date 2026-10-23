@@ -193,6 +193,8 @@ class AIProvider:
         if "2.5" in model_name and "pro" not in model_name:
             thinking_budget = int(os.getenv("AI_THINKING_BUDGET", "0"))
             generation_config["thinkingConfig"] = {"thinkingBudget": thinking_budget}
+        elif "gemini-3" in model_name and os.getenv("AI_THINKING_LEVEL"):
+            generation_config["thinkingConfig"] = {"thinkingLevel": os.getenv("AI_THINKING_LEVEL")}
 
         payload = {
             "contents": [{
@@ -213,6 +215,14 @@ class AIProvider:
             with open(payload_file, 'w') as f:
                 json.dump(payload, f, indent=2)
             print(f"📄 Saved payload to {payload_file} (prompt: ~{len(combined_prompt)//4} tokens)")
+            old_files = sorted(
+                f for f in os.listdir("payloads") if f.startswith("google_ai_payload_") and f.endswith(".json")
+            )[:-10]
+            for old_name in old_files:
+                try:
+                    os.remove(os.path.join("payloads", old_name))
+                except OSError:
+                    pass
         except OSError as e:
             print(f"⚠️  Could not save debug payload: {e}")
 
@@ -245,6 +255,16 @@ class AIProvider:
                 except Exception:
                     error_desc = f"HTTP {e.response.status_code} — {e.response.text[:300]}"
 
+                if (
+                    e.response.status_code == 400
+                    and "thinkingConfig" in generation_config
+                    and "thinking" in e.response.text.lower()
+                    and attempt < max_retries - 1
+                ):
+                    print("⚠️ Google AI rejected thinkingConfig for this model — retrying without it")
+                    generation_config.pop("thinkingConfig", None)
+                    continue
+
                 if e.response.status_code == 429:
                     body = e.response.text
                     delay_match = re.search(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"', body)
@@ -274,6 +294,13 @@ class AIProvider:
                 raise Exception(f"Google AI error: {str(e)}")
 
         result = response.json()
+
+        usage = result.get("usageMetadata", {})
+        print(
+            f"📊 Google AI usage: prompt={usage.get('promptTokenCount', '?')} "
+            f"output={usage.get('candidatesTokenCount', '?')} thinking={usage.get('thoughtsTokenCount', 0)} "
+            f"(limit {max_output})"
+        )
 
         if "candidates" in result and len(result["candidates"]) > 0:
             candidate = result["candidates"][0]

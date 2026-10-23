@@ -73,8 +73,10 @@ _ai_scheduler_pause_until: Optional[datetime] = None
 
 async def _ai_usage_hook(event: str) -> None:
     """Count every real provider HTTP request and mark the budget exhausted on a daily-quota 429."""
-    default_path = "/app/data/magiclists.db" if os.path.exists("/app/data") else "./magiclists.db"
-    usage_db = DatabaseManager(os.getenv("DATABASE_PATH", default_path))
+    global _usage_db
+    if _usage_db is None:
+        _usage_db = _make_db()
+    usage_db = _usage_db
     if event == "request":
         await usage_db.increment_ai_requests(1)
     elif event == "daily_exhausted":
@@ -82,19 +84,27 @@ async def _ai_usage_hook(event: str) -> None:
         scheduler_logger.warning("🚫 Provider reported daily quota exhausted — AI budget set to 0 remaining")
 
 
+_usage_db: Optional[DatabaseManager] = None
 set_usage_hook(_ai_usage_hook)
 
 
+_ai_rate_lock = asyncio.Lock()
+
+
 async def _ai_rate_limit() -> None:
-    """Sleep until at least _AI_MIN_INTERVAL seconds have passed since the last AI call."""
+    """Sleep until at least _AI_MIN_INTERVAL seconds have passed since the last AI call.
+
+    The lock serializes concurrent callers (scheduler and refresh queue) so they cannot burst past the RPM limit.
+    """
     global _last_ai_call_ts
     import time
-    now = time.monotonic()
-    wait = _last_ai_call_ts + _AI_MIN_INTERVAL - now
-    if wait > 0:
-        scheduler_logger.debug(f"⏳ AI rate-limit: sleeping {wait:.1f}s")
-        await asyncio.sleep(wait)
-    _last_ai_call_ts = time.monotonic()
+    async with _ai_rate_lock:
+        now = time.monotonic()
+        wait = _last_ai_call_ts + _AI_MIN_INTERVAL - now
+        if wait > 0:
+            scheduler_logger.debug(f"⏳ AI rate-limit: sleeping {wait:.1f}s")
+            await asyncio.sleep(wait)
+        _last_ai_call_ts = time.monotonic()
 # ──────────────────────────────────────────────────────────────────────────
 
 @app.on_event("startup")
@@ -1482,18 +1492,78 @@ async def _atomic_create_playlist(
     return navidrome_playlist_id, playlist
 
 
-async def refresh_playlist_batch(batch: list, db: DatabaseManager) -> None:
+# ── Scheduled batch refresh helpers ────────────────────────────────────────
+_playlist_fail_counts: Dict[int, int] = {}
+
+
+def _backoff_hours(failures: int) -> int:
+    """Escalating retry delay: 1h, 2h, 4h, then 8h."""
+    return min(8, 2 ** max(0, failures - 1))
+
+
+def _scheduler_paused() -> bool:
+    return _ai_scheduler_pause_until is not None and datetime.now() < _ai_scheduler_pause_until
+
+
+async def _defer_playlist(db: DatabaseManager, scheduled, reason: str) -> None:
+    """Push one playlist's next refresh out with escalating backoff so a persistent problem never retries hourly."""
+    count = _playlist_fail_counts.get(scheduled.id, 0) + 1
+    _playlist_fail_counts[scheduled.id] = count
+    hours = _backoff_hours(count)
+    retry_at = datetime.now() + timedelta(hours=hours)
+    await db.update_scheduled_playlist_next_refresh(scheduled.id, retry_at)
+    scheduler_logger.warning(
+        f"⚠️ Batch: playlist {scheduled.navidrome_playlist_id} deferred {hours}h ({count}x in a row): {reason}"
+    )
+
+
+async def _fail_batch_call(db: DatabaseManager, tasks: list, reason: str) -> None:
+    """Handle a failed combined AI call: defer all playlists, pause the scheduler's AI use, then raise."""
     global _ai_batch_failures, _ai_scheduler_pause_until
+    _ai_batch_failures += 1
+    hours = _backoff_hours(_ai_batch_failures)
+    retry_at = datetime.now() + timedelta(hours=hours)
+    _ai_scheduler_pause_until = retry_at
+    for task in tasks:
+        await db.update_scheduled_playlist_next_refresh(task["scheduled"].id, retry_at)
+    scheduler_logger.warning(
+        f"⚠️ Batch AI call failed ({_ai_batch_failures}x in a row) — retry in {hours}h for all "
+        f"{len(tasks)} playlists. Reason: {reason[:200]}"
+    )
+    raise AITemporarilyUnavailableError(f"Batch AI call failed: {reason[:200]}")
+
+
+def _parse_index_list(value: Any, limit: int, quota: int) -> List[int]:
+    """Convert an AI-returned list into unique, in-range candidate indices (max `quota`)."""
+    if not isinstance(value, list):
+        return []
+    seen: set = set()
+    result: List[int] = []
+    for item in value:
+        try:
+            idx = int(item)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= idx < limit and idx not in seen:
+            seen.add(idx)
+            result.append(idx)
+        if len(result) >= quota:
+            break
+    return result
+
+
+async def refresh_playlist_batch(batch: list, db: DatabaseManager) -> None:
     """Refresh multiple non-rediscover playlists with a single AI call.
 
-    Each playlist's candidate tracks are prepared individually (using the same
-    scoring logic as the per-type refresh functions), then all playlists are
-    sent to the AI in one combined prompt.  The response is a JSON object keyed
-    by navidrome_playlist_id; titles are matched back to track IDs and each
-    playlist is updated in Navidrome and the local DB.
+    Candidate tracks are prepared per playlist and numbered; the AI returns the
+    chosen numbers (plus a short reasoning) keyed by navidrome_playlist_id.
+    Every failure path defers the affected playlists with escalating backoff.
     """
     import json as _json
+    import random as _random
     import re as _re
+
+    global _ai_batch_failures, _ai_scheduler_pause_until
 
     nav_client = get_navidrome_client()
     ai_client_instance = get_ai_client()
@@ -1506,9 +1576,7 @@ async def refresh_playlist_batch(batch: list, db: DatabaseManager) -> None:
                 scheduled_playlist.navidrome_playlist_id
             )
             if not original_playlist:
-                scheduler_logger.warning(
-                    f"⚠️ Batch: playlist not found in DB: {scheduled_playlist.navidrome_playlist_id}"
-                )
+                await _defer_playlist(db, scheduled_playlist, "playlist not found in DB")
                 continue
 
             playlist_type = scheduled_playlist.playlist_type
@@ -1526,21 +1594,31 @@ async def refresh_playlist_batch(batch: list, db: DatabaseManager) -> None:
 
             all_tracks = []
             context_description = ""
+            type_instruction = ""
 
             if playlist_type == "this_is":
                 artist_id = original_playlist["artist_id"]
                 all_artists = await nav_client.get_artists()
                 artist = next((a for a in all_artists if a["id"] == artist_id), None)
                 if not artist:
+                    await _defer_playlist(db, scheduled_playlist, "artist not found in library")
                     continue
                 all_tracks = await nav_client.get_tracks_by_artist(artist_id, library_ids)
                 _artist_name = artist["name"]
                 context_description = f"'This Is {_artist_name}' — showcase playlist for {_artist_name}"
+                type_instruction = (
+                    "Showcase the artist's best and most representative tracks, mixing well-known songs "
+                    "with strong deep cuts; avoid near-duplicate versions of the same song."
+                )
 
             elif playlist_type == "genre_mix":
                 genre = original_playlist["artist_id"]
                 all_tracks = await nav_client.get_tracks_by_genre(genre, library_ids)
                 context_description = f"Genre Mix: {genre}"
+                type_instruction = (
+                    "Build a balanced mix across many different artists (max 2-3 tracks per artist) "
+                    "with varied tempo and era."
+                )
 
             elif playlist_type == "multi_artist_radio":
                 settings = _json.loads(original_playlist["artist_id"])
@@ -1553,12 +1631,20 @@ async def refresh_playlist_batch(batch: list, db: DatabaseManager) -> None:
                             seen_ids.add(t["id"])
                             all_tracks.append(t)
                 context_description = f"Multi-Artist Radio: {', '.join(artist_names_list)}"
+                type_instruction = (
+                    "Blend the listed artists like a radio station: rotate between them with natural flow "
+                    "and give each a fair share."
+                )
 
             elif playlist_type == "multi_genre_mix":
                 settings = _json.loads(original_playlist["artist_id"])
                 genres = settings.get("genres", [])
                 all_tracks = await nav_client.get_tracks_for_multiple_genres(genres, library_ids)
                 context_description = f"Multi-Genre Mix: {', '.join(genres)}"
+                type_instruction = (
+                    "Blend all listed genres with smooth transitions and rotate between them; "
+                    "give each genre a fair share."
+                )
 
             elif playlist_type == "decade_discovery":
                 settings = _json.loads(original_playlist["artist_id"])
@@ -1568,6 +1654,10 @@ async def refresh_playlist_batch(batch: list, db: DatabaseManager) -> None:
                 year_end = max(DECADE_YEAR_MAP[d][1] for d in decades if d in DECADE_YEAR_MAP)
                 all_tracks = await nav_client.get_tracks_by_year_range(year_start, year_end, library_ids)
                 context_description = f"Decade Discovery: {' & '.join(decades)} ({mode} mode)"
+                type_instruction = (
+                    f"Cover all listed decades fairly. Mode '{mode}': "
+                    "Blend = interleave the decades; otherwise group tracks decade by decade."
+                )
 
             elif playlist_type == "sonic_journey":
                 settings = _json.loads(original_playlist["artist_id"])
@@ -1575,6 +1665,11 @@ async def refresh_playlist_batch(batch: list, db: DatabaseManager) -> None:
                 end_name = settings.get("end_artist_name", "")
                 all_tracks = await nav_client.get_all_tracks(library_ids, max_tracks=3000)
                 context_description = f"Sonic Journey from {start_name} to {end_name}"
+                type_instruction = (
+                    f"Order the tracks as a gradual journey: begin with the sound of {start_name}, "
+                    f"move step by step, and end with the sound of {end_name}. "
+                    "The order of the numbers you return IS the playlist order."
+                )
 
             elif playlist_type == "genre_archaeology":
                 settings = _json.loads(original_playlist["artist_id"])
@@ -1582,14 +1677,17 @@ async def refresh_playlist_batch(batch: list, db: DatabaseManager) -> None:
                 dig_depth = settings.get("dig_depth", "Medium")
                 all_tracks = await nav_client.get_tracks_by_genre(genre, library_ids)
                 context_description = f"Genre Archaeology: {genre} ({dig_depth} dig)"
+                type_instruction = (
+                    f"Dig depth '{dig_depth}': the deeper the dig, the more lesser-known, rare and "
+                    "influential deep cuts instead of the obvious hits."
+                )
 
             else:
+                await _defer_playlist(db, scheduled_playlist, f"unsupported type {playlist_type}")
                 continue
 
             if not all_tracks:
-                scheduler_logger.warning(
-                    f"⚠️ Batch: no tracks for {scheduled_playlist.navidrome_playlist_id}"
-                )
+                await _defer_playlist(db, scheduled_playlist, "no tracks found")
                 continue
 
             # Exclude previously used tracks where possible
@@ -1606,6 +1704,8 @@ async def refresh_playlist_batch(batch: list, db: DatabaseManager) -> None:
             filtered_tracks, _ = build_tiered_pool(
                 candidate_tracks, pool_size, stored_discovery_ratio, library_stats
             )
+            candidates = list(filtered_tracks)
+            _random.shuffle(candidates)  # avoid positional bias from library order
 
             if previous_songs:
                 sample_titles = ", ".join(f'"{t}"' for t in previous_songs[:8])
@@ -1621,49 +1721,57 @@ async def refresh_playlist_batch(batch: list, db: DatabaseManager) -> None:
                 {
                     "scheduled": scheduled_playlist,
                     "original_playlist": original_playlist,
+                    "playlist_type": playlist_type,
                     "all_tracks": all_tracks,
-                    "filtered_tracks": filtered_tracks,
+                    "all_previous": all_previous,
+                    "candidates": candidates,
                     "quota": original_length,
                     "variety_instruction": variety_instruction,
+                    "type_instruction": type_instruction,
                     "context_description": context_description,
                     "playlist_name": original_playlist.get("playlist_name", ""),
                 }
             )
         except Exception as prep_err:
-            scheduler_logger.error(
-                f"❌ Batch prep failed for {scheduled_playlist.navidrome_playlist_id}: {prep_err}"
+            await _defer_playlist(
+                db, scheduled_playlist, f"preparation failed: {prep_err}"
             )
             continue
 
     if not tasks:
         return
 
-    # Build combined prompt
+    # Build combined prompt (numbered candidates; the AI answers with numbers)
     playlist_blocks = []
     for i, task in enumerate(tasks, 1):
         track_list = [
-            {"title": t.get("title", ""), "artist": t.get("artist", "")}
-            for t in task["filtered_tracks"]
+            {"n": n, "title": t.get("title", ""), "artist": t.get("artist", "")}
+            for n, t in enumerate(task["candidates"])
         ]
         block = (
             f"[PLAYLIST {i}]\n"
             f"ID: {task['scheduled'].navidrome_playlist_id}\n"
             f"Name: {task['playlist_name']}\n"
             f"Description: {task['context_description']}\n"
-            f"Select: {task['quota']} tracks\n"
+            f"Instructions: {task['type_instruction']}\n"
+            f"Select: exactly {task['quota']} tracks\n"
             f"{task['variety_instruction']}\n"
-            f"Candidates:\n{_json.dumps(track_list, ensure_ascii=False)}"
+            f"Candidates:\n{_json.dumps(track_list, ensure_ascii=False, separators=(',', ':'))}"
         )
         playlist_blocks.append(block)
 
     id_list = ", ".join(
-        f'"{t["scheduled"].navidrome_playlist_id}": ["Title 1", ...]' for t in tasks
+        f'"{t["scheduled"].navidrome_playlist_id}": {{"tracks": [n, n, ...], "reasoning": "..."}}'
+        for t in tasks
     )
     system_prompt = (
-        "You are a music curator. Select tracks for multiple playlists from provided candidate lists.\n"
-        "Return ONLY a valid JSON object where each key is the playlist ID and the value is an array of "
-        "selected track titles matching exactly what is in the candidates list.\n"
-        "Do not include explanations — only the JSON object."
+        "You are a music curator. For each playlist, choose tracks ONLY from that playlist's own candidate "
+        "list. Candidates are numbered with \"n\"; refer to a track only by its number.\n"
+        "Return ONLY a valid JSON object. Each key is a playlist ID; each value is an object with "
+        "\"tracks\" (the chosen candidate numbers in playlist order, no duplicates) and \"reasoning\" "
+        "(one or two sentences describing the playlist).\n"
+        "Follow each playlist's Instructions and select the requested number of tracks. "
+        "No text outside the JSON object."
     )
     user_prompt = (
         "\n\n".join(playlist_blocks)
@@ -1680,64 +1788,71 @@ async def refresh_playlist_batch(batch: list, db: DatabaseManager) -> None:
             max_tokens=16000,
             temperature=0.7,
         )
-        _ai_batch_failures = 0
-        _ai_scheduler_pause_until = None
-        scheduler_logger.info(
-            f"✅ Batch AI call succeeded for {len(tasks)} playlists (1 RPD consumed)"
-        )
     except Exception as ai_err:
-        err_str = str(ai_err)
-        # Escalating backoff (1h, 2h, 4h, 8h) so a persistent failure cannot burn the daily quota hourly
-        _ai_batch_failures += 1
-        backoff_hours = min(8, 2 ** (_ai_batch_failures - 1))
-        retry_at = datetime.now() + timedelta(hours=backoff_hours)
-        _ai_scheduler_pause_until = retry_at
-        for task in tasks:
-            await db.update_scheduled_playlist_next_refresh(task["scheduled"].id, retry_at)
-        scheduler_logger.warning(
-            f"⚠️ Batch AI call failed ({_ai_batch_failures}x in a row) — retry in {backoff_hours}h for all {len(tasks)} playlists. Error: {err_str[:150]}"
-        )
-        raise AITemporarilyUnavailableError(f"Batch AI call failed: {err_str[:200]}")
+        await _fail_batch_call(db, tasks, str(ai_err))
 
     # Parse response
-    selections: dict = {}
     try:
         json_match = _re.search(r"\{[\s\S]*\}", raw_response)
         selections = _json.loads(json_match.group() if json_match else raw_response)
+        if not isinstance(selections, dict):
+            raise ValueError("response is not a JSON object")
     except Exception as parse_err:
-        scheduler_logger.error(
-            f"❌ Batch: could not parse AI response as JSON: {parse_err}. "
-            f"Response snippet: {raw_response[:300]}"
+        await _fail_batch_call(
+            db, tasks, f"could not parse AI response as JSON: {parse_err}; snippet: {raw_response[:200]}"
         )
-        return
+
+    _ai_batch_failures = 0
+    _ai_scheduler_pause_until = None
+    scheduler_logger.info(
+        f"✅ Batch AI call succeeded for {len(tasks)} playlists (1 request)"
+    )
 
     # Apply selections
     for task in tasks:
-        pid = task["scheduled"].navidrome_playlist_id
-        selected_titles = selections.get(pid, [])
-        if not selected_titles:
-            scheduler_logger.warning(f"⚠️ Batch: no titles returned for playlist {pid}")
-            continue
+        scheduled = task["scheduled"]
+        pid = scheduled.navidrome_playlist_id
+        candidates = task["candidates"]
+        quota = task["quota"]
 
-        title_to_id = {t["title"].lower().strip(): t["id"] for t in task["all_tracks"]}
-        curated_track_ids = [
-            title_to_id[title.lower().strip()]
-            for title in selected_titles
-            if title.lower().strip() in title_to_id
-        ]
+        entry = selections.get(pid)
+        if isinstance(entry, dict):
+            raw_indices = entry.get("tracks") or entry.get("track_ids") or entry.get("indices")
+            ai_reasoning = entry.get("reasoning") if isinstance(entry.get("reasoning"), str) else ""
+        else:
+            raw_indices, ai_reasoning = entry, ""
 
-        if not curated_track_ids:
-            scheduler_logger.warning(
-                f"⚠️ Batch: could not match any AI titles to track IDs for playlist {pid}"
+        indices = _parse_index_list(raw_indices, len(candidates), quota)
+        # Require a meaningful AI contribution; a tiny/garbled answer must not be padded into a playlist
+        if len(indices) < max(1, quota // 2):
+            await _defer_playlist(
+                db, scheduled, f"AI returned only {len(indices)} valid track numbers (need {quota})"
             )
             continue
 
-        # Fill gap if needed
-        if len(curated_track_ids) < task["quota"] and len(task["all_tracks"]) >= task["quota"]:
-            gap = task["quota"] - len(curated_track_ids)
+        curated_track_ids = [candidates[i]["id"] for i in indices]
+
+        # Fill any gap with fresh tracks, distributed across artists
+        if len(curated_track_ids) < quota:
+            gap = quota - len(curated_track_ids)
             used_ids = set(curated_track_ids)
-            extra = [t["id"] for t in task["all_tracks"] if t["id"] not in used_ids]
-            curated_track_ids.extend(extra[:gap])
+            fresh = [
+                t for t in task["all_tracks"]
+                if t["id"] not in used_ids and t.get("title", "") not in task["all_previous"]
+            ]
+            if len(fresh) < gap:
+                fresh = [t for t in task["all_tracks"] if t["id"] not in used_ids]
+            _random.shuffle(fresh)
+            gap_pool = fresh[: gap * 4]
+            if task["playlist_type"] == "sonic_journey":
+                gap_ids = [t["id"] for t in gap_pool[:gap]]
+            else:
+                id_to_artist = {t["id"]: t.get("artist") or "Unknown" for t in gap_pool}
+                gap_ids = _distribute_by_artist([t["id"] for t in gap_pool], id_to_artist, gap)
+                if len(gap_ids) < gap:
+                    taken = set(gap_ids)
+                    gap_ids += [t["id"] for t in gap_pool if t["id"] not in taken][: gap - len(gap_ids)]
+            curated_track_ids.extend(gap_ids)
 
         try:
             await nav_client.update_playlist(
@@ -1749,19 +1864,23 @@ async def refresh_playlist_batch(batch: list, db: DatabaseManager) -> None:
             track_titles = [
                 track_id_to_title[tid] for tid in curated_track_ids if tid in track_id_to_title
             ]
-            await db.update_playlist_content(
-                navidrome_playlist_id=pid, songs=track_titles, reasoning="Batch AI refresh"
+            reasoning = (
+                ai_reasoning.strip()[:500]
+                or task["original_playlist"].get("reasoning")
+                or "Batch AI refresh"
             )
-            next_refresh = calculate_next_refresh(task["scheduled"].refresh_frequency)
-            await db.update_scheduled_playlist_next_refresh(task["scheduled"].id, next_refresh)
+            await db.update_playlist_content(
+                navidrome_playlist_id=pid, songs=track_titles, reasoning=reasoning
+            )
+            next_refresh = calculate_next_refresh(scheduled.refresh_frequency)
+            await db.update_scheduled_playlist_next_refresh(scheduled.id, next_refresh)
+            _playlist_fail_counts.pop(scheduled.id, None)
             scheduler_logger.info(
                 f"✅ Batch: refreshed playlist {pid} with {len(curated_track_ids)} tracks. "
                 f"Next: {next_refresh.strftime('%Y-%m-%d %H:%M:%S')}"
             )
         except Exception as apply_err:
-            scheduler_logger.error(
-                f"❌ Batch: failed to apply results for playlist {pid}: {apply_err}"
-            )
+            await _defer_playlist(db, scheduled, f"failed to apply results: {apply_err}")
 
 
 def schedule_playlist_refresh():
@@ -1838,13 +1957,6 @@ async def refresh_scheduled_playlists():
             )
             return
 
-        if len(final_playlists) > remaining_budget:
-            scheduler_logger.warning(
-                f"⚠️ AI budget: {remaining_budget} request(s) left today, "
-                f"have {len(final_playlists)} playlists due — processing only the most overdue ones"
-            )
-            final_playlists = sorted(final_playlists, key=lambda p: p.next_refresh)[:remaining_budget]
-
         # ── Log catch-up info ──────────────────────────────────────────────
         for p in final_playlists:
             scheduled_time = datetime.fromisoformat(p.next_refresh)
@@ -1865,12 +1977,20 @@ async def refresh_scheduled_playlists():
             if p.playlist_type not in ("rediscover", "rediscover_weekly_v2")
         ]
 
-        # Process batchable playlists in groups of 5 (one AI call per batch)
+        # Budget is counted in AI requests: one request per batch of up to 5 playlists,
+        # up to two per rediscover playlist (phase 1 + phase 2).
+        budget = remaining_budget
         BATCH_SIZE = 5
         for i in range(0, len(batchable_playlists), BATCH_SIZE):
+            if budget < 1:
+                scheduler_logger.warning("⚠️ AI budget used up for this run — remaining batches wait for the next run")
+                break
+            if _scheduler_paused():
+                break
             batch = batchable_playlists[i : i + BATCH_SIZE]
             for p in batch:
                 await db.delete_duplicate_scheduled_playlists(p.navidrome_playlist_id)
+            budget -= 1
             try:
                 await refresh_playlist_batch(batch, db)
             except AITemporarilyUnavailableError:
@@ -1880,6 +2000,12 @@ async def refresh_scheduled_playlists():
 
         # Process rediscover playlists individually
         for scheduled_playlist in rediscover_playlists:
+            if budget < 2:
+                scheduler_logger.warning("⚠️ AI budget too low for another Re-Discover refresh — waiting for the next run")
+                break
+            if _scheduler_paused():
+                break
+            budget -= 2
             await db.delete_duplicate_scheduled_playlists(scheduled_playlist.navidrome_playlist_id)
             try:
                 await refresh_rediscover_playlist(scheduled_playlist, db)

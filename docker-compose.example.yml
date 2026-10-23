@@ -28,6 +28,12 @@ services:
       AI_API_KEY: "your-google-ai-api-key"
       # Optional: override the default model
       # AI_MODEL: "gemini-2.5-flash"
+      # Gemini 2.5 Flash: thinking tokens eat the output limit; 0 = off (default)
+      # AI_THINKING_BUDGET: "0"
+      # Gemini 3.x models: thinking level, e.g. "minimal" or "low" (only set if the model supports it)
+      # AI_THINKING_LEVEL: "low"
+      # Daily AI request budget (Google free tier: 20/day for 2.5 Flash; keep a small buffer)
+      # AI_RPD_LIMIT: "18"
 
       # --- Database path (keep default unless you know what you're doing) ---
       DATABASE_PATH: "/app/data/magiclists.db"
