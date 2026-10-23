@@ -66,6 +66,9 @@ AI_RPD_LIMIT = int(os.getenv("AI_RPD_LIMIT", "18"))
 # Minimum gap between consecutive AI calls (13 s ≈ 4.6 RPM vs. 5 RPM limit)
 _AI_MIN_INTERVAL: float = 13.0
 _last_ai_call_ts: float = 0.0
+# Consecutive failed scheduled batch calls and the time before which the scheduler must not call the AI again
+_ai_batch_failures: int = 0
+_ai_scheduler_pause_until: Optional[datetime] = None
 
 
 async def _ai_usage_hook(event: str) -> None:
@@ -1480,6 +1483,7 @@ async def _atomic_create_playlist(
 
 
 async def refresh_playlist_batch(batch: list, db: DatabaseManager) -> None:
+    global _ai_batch_failures, _ai_scheduler_pause_until
     """Refresh multiple non-rediscover playlists with a single AI call.
 
     Each playlist's candidate tracks are prepared individually (using the same
@@ -1673,19 +1677,25 @@ async def refresh_playlist_batch(batch: list, db: DatabaseManager) -> None:
         raw_response = await ai_client_instance.provider.generate(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            max_tokens=8000,
+            max_tokens=16000,
             temperature=0.7,
         )
+        _ai_batch_failures = 0
+        _ai_scheduler_pause_until = None
         scheduler_logger.info(
             f"✅ Batch AI call succeeded for {len(tasks)} playlists (1 RPD consumed)"
         )
     except Exception as ai_err:
         err_str = str(ai_err)
-        retry_at = datetime.now() + timedelta(hours=1)
+        # Escalating backoff (1h, 2h, 4h, 8h) so a persistent failure cannot burn the daily quota hourly
+        _ai_batch_failures += 1
+        backoff_hours = min(8, 2 ** (_ai_batch_failures - 1))
+        retry_at = datetime.now() + timedelta(hours=backoff_hours)
+        _ai_scheduler_pause_until = retry_at
         for task in tasks:
             await db.update_scheduled_playlist_next_refresh(task["scheduled"].id, retry_at)
         scheduler_logger.warning(
-            f"⚠️ Batch AI call failed — retry scheduled for all {len(tasks)} playlists. Error: {err_str[:150]}"
+            f"⚠️ Batch AI call failed ({_ai_batch_failures}x in a row) — retry in {backoff_hours}h for all {len(tasks)} playlists. Error: {err_str[:150]}"
         )
         raise AITemporarilyUnavailableError(f"Batch AI call failed: {err_str[:200]}")
 
@@ -1779,6 +1789,12 @@ async def refresh_scheduled_playlists():
 
         if LOG_LEVEL == "DEBUG":
             scheduler_logger.debug(f"🔄 Scheduler auto-run initiated at {current_time.strftime('%H:%M:%S')}")
+
+        if _ai_scheduler_pause_until and current_time < _ai_scheduler_pause_until:
+            scheduler_logger.info(
+                f"⏸ AI scheduler paused after repeated failures until {_ai_scheduler_pause_until.strftime('%H:%M')}"
+            )
+            return
 
         scheduler_logger.info("🔍 Checking for playlists due for refresh...")
 

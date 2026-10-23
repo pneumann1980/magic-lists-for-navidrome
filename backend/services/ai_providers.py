@@ -187,6 +187,13 @@ class AIProvider:
             "maxOutputTokens": max_output
         }
 
+        # Gemini 2.5 "thinking" tokens count against maxOutputTokens and can starve the
+        # visible answer (finishReason MAX_TOKENS). Disable it for Flash models; Pro cannot disable it.
+        model_name = (self.model or "").lower()
+        if "2.5" in model_name and "pro" not in model_name:
+            thinking_budget = int(os.getenv("AI_THINKING_BUDGET", "0"))
+            generation_config["thinkingConfig"] = {"thinkingBudget": thinking_budget}
+
         payload = {
             "contents": [{
                 "parts": [{
@@ -215,13 +222,14 @@ class AIProvider:
 
         for attempt in range(max_retries):
             try:
-                await _notify_usage("request")
                 response = await self.client.post(
                     url,
                     json=payload,
                     headers=headers,
                     timeout=120.0
                 )
+                if response.status_code != 429 and response.status_code < 500:
+                    await _notify_usage("request")
                 response.raise_for_status()
                 break  # Success — exit retry loop
             except httpx.HTTPStatusError as e:
@@ -278,9 +286,10 @@ class AIProvider:
                 elif finish_reason == "MAX_TOKENS":
                     prompt_tokens = result.get('usageMetadata', {}).get('promptTokenCount', 'unknown')
                     output_tokens = result.get('usageMetadata', {}).get('candidatesTokenCount', 'unknown')
+                    thought_tokens = result.get('usageMetadata', {}).get('thoughtsTokenCount', 0)
                     raise Exception(
                         f"Google AI response incomplete: output hit {max_output} token limit. "
-                        f"Input: {prompt_tokens} tokens, Output: {output_tokens} tokens. "
+                        f"Input: {prompt_tokens} tokens, Output: {output_tokens} tokens, Thinking: {thought_tokens} tokens. "
                         f"Increase max_tokens parameter if you need longer responses."
                     )
 
